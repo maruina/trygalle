@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -72,9 +73,9 @@ func runToSettled(t *testing.T, client *rpc.Client) []rpc.Event {
 // lastAssistantOf inspects the last assistant message in an agent_end event.
 // The plan pins failed-run classification on agent_end.messages.
 func lastAssistantOf(end rpc.Event) (rpc.Message, bool) {
-	for i := len(end.Messages) - 1; i >= 0; i-- {
-		if end.Messages[i].Role == "assistant" {
-			return end.Messages[i], true
+	for _, v := range slices.Backward(end.Messages) {
+		if v.Role == "assistant" {
+			return v, true
 		}
 	}
 	return rpc.Message{}, false

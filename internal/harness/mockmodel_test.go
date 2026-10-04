@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func decodeCompletion(t *testing.T, body []byte) map[string]any {
 func sseFrames(t *testing.T, body []byte) []map[string]any {
 	t.Helper()
 	var frames []map[string]any
-	for _, line := range bytes.Split(body, []byte("\n")) {
+	for line := range bytes.SplitSeq(body, []byte("\n")) {
 		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
@@ -126,7 +127,7 @@ func TestMockModelScriptedBehaviors(t *testing.T) {
 	t.Run("fail always", func(t *testing.T) {
 		m := StartMockModel(t)
 		m.FailAlways()
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			resp, err := http.Post(m.URL()+"/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[],"stream":false}`))
 			if err != nil {
 				t.Fatalf("post %d: %v", i, err)
@@ -182,12 +183,7 @@ func TestMockModelCapturesMetadataOnly(t *testing.T) {
 }
 
 func contains(list []string, want string) bool {
-	for _, v := range list {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, want)
 }
 
 func TestWriteModelsJSON(t *testing.T) {
