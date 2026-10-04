@@ -37,6 +37,7 @@ Matteo is the sole user, operator, and maintainer. Secondary readers are reviewe
 ## Context reviewed
 - Pi documentation installed with the pinned CLI: `rpc.md`, `rpc-commands.md`, `json.md`, `rpc-extension-ui.md`, `sessions.md`, `session-format.md`, `how-pi-works.md`, `slash-commands.md`, `keybindings.md`.
 - Installed Pi implementation (compiled `dist/`): `agent-session.js` prompt/steer/compaction paths, `session-manager.js` session loading and discovery, `interactive-mode.js` TUI input handling, `rpc-mode.js` command dispatch. Used to verify documented behavior and to answer questions the documentation leaves open.
+- Live protocol experiment against Pi 1.0.1: a temporary extension command synchronously called `pi.sendMessage(..., { triggerTurn: true })`; a local mock model kept the test hermetic. Across five runs, `agent_start` preceded the RPC `prompt` response with disposition `handled`. A variant that scheduled the call 25 ms after the handler returned emitted `handled` first and `agent_start` later.
 - Prior art: OpenClaw gateway documentation (messages, agent runtime, session concepts), Hermes Agent messaging documentation, `badlogic/pi-telegram` (README and source), `atharva-again/tandoor` (README), and the Pi Durable announcement post.
 - Advisory learning store: one matched section ("Decouple data-plane operation from control-plane availability via local state retention"); not materially applicable to a single local subprocess and recorded here for provenance only.
 
@@ -44,7 +45,7 @@ Matteo is the sole user, operator, and maintainer. Secondary readers are reviewe
 Verified against documentation and, where noted, the installed implementation:
 
 - `prompt` accepts an optional `streamingBehavior` field; the value `"steer"` queues the message into an active run (implementation-verified in `rpc-mode.js`).
-- `prompt` response `data.disposition` is `"started"`, `"queued"`, or `"handled"`. `"handled"` means an extension command or input handler consumed the prompt and no run started for it; an extension command may still start its own run through `pi.sendMessage()` (implementation-verified in `agent-session.js`).
+- `prompt` response `data.disposition` is `"started"`, `"queued"`, or `"handled"`. `"handled"` means an extension command or input handler consumed the prompt and no run started for that prompt; an extension command may still start its own run through `pi.sendMessage()` (implementation-verified in `agent-session.js`). For Pi 1.0.1, when the awaited extension command handler directly calls `pi.sendMessage(..., { triggerTurn: true })`, `agent_start` is emitted before the `handled` response. The implementation path and a five-run live experiment verify this ordering; the contract suite must pin it. A 25 ms `setTimeout` variant emits `handled` first, so fire-and-forget work scheduled after the handler returns is outside this attribution contract.
 - `steer` and `follow_up` error when the text is an extension command (implementation-verified).
 - `prompt` throws while compaction is in progress; `steer` queues during compaction (implementation-verified).
 - `agent_end` closes one low-level run and may be followed by retries, compaction recovery, steering, or follow-ups. `agent_settled` means Pi has no remaining automatic work.
@@ -76,7 +77,7 @@ Startup validation is the detector for every startup failure mode:
 2. Send `get_commands`; require a success response with a non-empty list. Log category counts (extensions, prompt templates, skills) without names; the expected-inventory comparison happens outside the application.
 3. Log the resumed session identifier from `get_state` so a silent fallback to an older session is visible in diagnostics.
 
-If validation fails or Pi exits, retry once with the same command line (transient causes). A second consecutive failure restarts Pi without `--continue`: a fresh session, a loud system notice to the user ("session resume failed; started a fresh conversation"), and a log entry with the failure. If the degraded start also fails, the cause is not the session; Trygalle exits and Kubernetes restarts the pod, matching the parent's fatal behavior.
+If validation fails or Pi exits, stop that process before retrying once with the same command line (transient causes). Close stdin, wait under a bounded deadline, and kill the child if it does not exit; never overlap Pi processes that share a session directory. A second consecutive failure starts Pi without `--continue`: a fresh session, a loud system notice to the user ("session resume failed; started a fresh conversation"), and a log entry with the failure. If the degraded start also fails, the cause is not the session; Trygalle exits and Kubernetes restarts the pod, matching the parent's fatal behavior.
 
 ### Session resume
 Pi owns the definition of "latest": `--continue` resumes the most recent session for the current working directory. Trygalle never lists, ranks, or parses session files. Two consequences fall out for free: after `/new`, the new session is the most recent, so the parent's "the new session becomes the one that resumes after restart" holds without code; and the working directory (pinned by the image design) defines the candidate session set.
@@ -102,23 +103,23 @@ One rule, no coordinator-state branching:
 `/new` mirrors the TUI's immediate execution: the active operation is superseded, not rejected. `clear_queue` runs first so no steering messages survive the switch. A `session_before_switch` extension handler may cancel the switch (`{"cancelled": true}`); Trygalle reports the cancellation and keeps the current session.
 
 ### Operation state machine
-An operation is the run started by a user message plus everything steered into it. The coordinator tracks one operation for attribution and visibility; it does not serialize or gate input.
+An operation is the run started by a user message plus everything steered into it. One coordinator event loop is the sole consumer of Pi events and UI requests and owns operation state. It also observes process exit. `HandleUserInput` routes a command and returns after its RPC response; it does not wait for `agent_settled`, so the REPL can accept more input while a run is active. Concurrent state changes are serialized by the coordinator, while Pi remains the authority on queueing and run state.
 
 States and transitions:
 
 | State | Entry | Exit |
 |---|---|---|
-| Idle | Startup complete, or terminal state delivered | `prompt` accepted (`"started"`) or `"handled"` followed by run events |
+| Idle | Startup complete, or terminal state delivered | `prompt` accepted (`"started"`) or `"handled"` with a preceding `agent_start` |
 | Running | Run started for the operation | `agent_settled`, failure classification, abort, or `/new` supersede |
 | Superseded | `new_session` succeeded mid-run | Idle after reporting |
 
 Completion rules:
 
 - **`"started"` / `"queued"`:** the response means acceptance only. The operation is complete at `agent_settled`.
-- **`"handled"`:** no run started for this prompt, but an extension may start its own run through `pi.sendMessage()`. Stay subscribed: if run events follow, track them to `agent_settled`; if nothing follows, the operation is complete immediately.
+- **`"handled"`:** no run started for this prompt, but an extension handler may synchronously start a run through `pi.sendMessage()`. For the pinned Pi 1.0.1 path, `agent_start` for that run arrives before the `handled` response. If the coordinator observed that event before the response, track the run to `agent_settled`; otherwise complete the handled input immediately without querying previous assistant text. Contract-test this ordering. Fire-and-forget work scheduled after an extension handler returns is outside operation attribution and is logged as unassociated; revisit only if Pi adds a request-to-run correlation mechanism.
 - **Retries, compaction, steering, follow-ups:** all covered by waiting for `agent_settled`; `agent_end` alone is never the completion signal.
 
-Final text source: after `agent_settled`, send `get_last_assistant_text`. It is authoritative and returns an explicit `null`. Do not reconstruct text from the event stream; the coordinator uses events only for terminal-state classification (assistant `stopReason` and error messages). One guard: call `get_last_assistant_text` only when a run actually settled for this operation. After `"handled"` with no run and no events, the query would return the previous run's text; send the empty-response notice directly instead.
+Final text source: after `agent_settled`, send `get_last_assistant_text`. It is authoritative and returns `null` when no assistant text exists; treat an empty string as no text as well. Do not reconstruct text from the event stream; the coordinator uses events only for terminal-state classification (assistant `stopReason` and error messages). One guard: call `get_last_assistant_text` only when a run actually settled for this operation. After `"handled"` with no run observed before the response, the query would return the previous run's text; send the empty/handled notice directly instead.
 
 ### Terminal states
 Every terminal state produces a visible Telegram outcome. The interface is not the TUI: nothing is shown unless it is sent, so silence is indistinguishable from a broken bridge.
@@ -229,6 +230,7 @@ Decision: deferred, not rejected. It is experimental ("the API might still chang
 | Extension command dialogs degrade interactive harness commands to no-ops | Immediate cancellation is visible in logs; future Telegram dialog bridging is the recorded restore path |
 | Heartbeat notices feel noisy on long runs | One configurable interval constant; wording owned by the Telegram design |
 | Protocol drift after a Pi version bump | Every fact in "Confirmed protocol facts" becomes a contract test; upgrade evidence gate owned by the operability design |
+| Pi changes extension-run event ordering | Live contract test pins `agent_start` before the `handled` response for a synchronous `pi.sendMessage(..., { triggerTurn: true })` call |
 
 ## Testing strategy
 Contract tests run against a controlled Pi process (or a protocol fixture implementing the same records) with a temporary session directory:
@@ -240,7 +242,7 @@ Contract tests run against a controlled Pi process (or a protocol fixture implem
 5. `new_session` canceled by a `session_before_switch` handler reports `cancelled` and keeps the session.
 6. `--continue` on an empty session directory (first boot) and on a damaged latest session (partial trailing line; wholly unreadable file).
 7. `agent_settled` after retries and compaction recovery; `agent_end` with `willRetry` is not treated as completion.
-8. `"handled"` with and without a following extension-initiated run; `get_last_assistant_text` null and stale-text guard cases.
+8. `"handled"` with and without an extension-initiated run; for a synchronous `pi.sendMessage(..., { triggerTurn: true })`, assert `agent_start` precedes the `handled` response. A delayed fire-and-forget event is not attributed to the completed input. Include null/empty final text and stale-text guard cases.
 9. Failed-run classification from assistant `stopReason: "error"` and the error message in events.
 10. Extension dialog requests are answered `cancelled` immediately; fire-and-forget requests are logged.
 11. Malformed stdout line → fatal exit; Pi `parse` error response → logged, not fatal.
@@ -254,7 +256,7 @@ This boundary logs lifecycle metadata by request identifier: Pi start/exit, sess
 The design is implemented locally against a controlled Pi process before receiving any Telegram or Kubernetes credentials, per the parent rollout. Rollback of the application reverts to the previous image; the session PVC is preserved. No schema or data migration is introduced by this component — it stores no durable state.
 
 ## Security and data handling
-The single-active-run posture is preserved: steering joins the same run, so fan-out remains bounded by one conversation. `clear_queue` + `abort` bounds what one prompt can cause. All protocol facts are documented behavior of the pinned Pi version; no private harness names, paths, or credentials appear in this design, its tests, or its logs.
+The single-active-run posture is preserved: steering joins the same run, so fan-out remains bounded by one conversation. `clear_queue` + `abort` bounds what one prompt can cause. Protocol facts come from the pinned Pi documentation or confirmed implementation behavior; implementation-only facts have contract tests. No private harness names, paths, or credentials appear in this design, its tests, or its logs.
 
 ## Open questions
 - Exact wording and formatting of every system notice (steer acknowledgment, empty response, failure, heartbeat, abort and new-session reports) — Telegram design
