@@ -296,6 +296,84 @@ func TestScriptedCloseStdin(t *testing.T) {
 	}
 }
 
+// TestSendAfterFatalFailsFast proves a send that starts after a protocol
+// integrity failure returns the terminal error instead of waiting for its
+// context.
+func TestSendAfterFatalFailsFast(t *testing.T) {
+	s := newScripted(t, discardLogger())
+	s.emit("not json")
+	_ = s.client.Wait()
+	go func() { s.wroteCommand() }()
+	sendErr := make(chan error, 1)
+	go func() {
+		_, err := s.client.Send(context.Background(), GetStateCommand())
+		sendErr <- err
+	}()
+	select {
+	case err := <-sendErr:
+		if _, ok := errors.AsType[*ProtocolError](err); !ok {
+			t.Fatalf("Send error = %v, want *ProtocolError", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send after a fatal failure did not return")
+	}
+}
+
+// stalledStdin is a child stdin that never drains: Write blocks until Close.
+type stalledStdin struct {
+	once    sync.Once
+	entered chan struct{}
+	closed  chan struct{}
+	close   sync.Once
+}
+
+func (s *stalledStdin) Write([]byte) (int, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (s *stalledStdin) Close() error {
+	s.close.Do(func() { close(s.closed) })
+	return nil
+}
+
+// TestCloseStdinReleasesStalledWrite proves CloseStdin does not wait behind a
+// write to a child that stopped reading, so a bounded stop can proceed.
+func TestCloseStdinReleasesStalledWrite(t *testing.T) {
+	stdin := &stalledStdin{entered: make(chan struct{}), closed: make(chan struct{})}
+	src := newLineSource()
+	t.Cleanup(src.close)
+	c := newClient(stdin, src, discardLogger(), func() error { return nil })
+	go c.readLoop()
+
+	sendErr := make(chan error, 1)
+	go func() {
+		_, err := c.Send(context.Background(), GetStateCommand())
+		sendErr <- err
+	}()
+	<-stdin.entered
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.CloseStdin() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("CloseStdin error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseStdin blocked behind a stalled write")
+	}
+	select {
+	case err := <-sendErr:
+		if err == nil {
+			t.Fatal("Send = nil error after stdin close, want a write failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled Send did not return after CloseStdin")
+	}
+}
+
 // mutexBuffer is a goroutine-safe byte buffer for log capture assertions.
 type mutexBuffer struct {
 	mu sync.Mutex

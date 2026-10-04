@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"testing"
@@ -35,6 +36,9 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(5)
 	case "sleep":
 		io.Copy(io.Discard, os.Stdin) // never responds; killed by the test
+	case "burst-then-exit":
+		burstThenExitHelper(os.Stdout)
+		os.Exit(0)
 	}
 }
 
@@ -53,6 +57,25 @@ func echoHelper(r io.Reader, w io.Writer) {
 		}
 		fmt.Fprintf(w, "{\"id\":%q,\"type\":\"response\",\"command\":%q,\"success\":true}\n", head.ID, head.Type)
 	}
+}
+
+// burstHelperEvents is the number of events burstThenExitHelper emits after
+// its first record. They fit in one pipe buffer, so the child can exit while
+// they are still unread.
+const burstHelperEvents = 8
+
+// burstThenExitHelper writes a response with an unknown id (the client logs
+// it), waits for the client to read it, then writes padded events and exits at
+// once.
+func burstThenExitHelper(w io.Writer) {
+	fmt.Fprintln(w, `{"id":"unknown","type":"response","command":"get_state","success":true}`)
+	time.Sleep(100 * time.Millisecond)
+	var out bytes.Buffer
+	pad := bytes.Repeat([]byte("x"), 1024)
+	for range burstHelperEvents {
+		fmt.Fprintf(&out, "{\"type\":\"agent_start\",\"reason\":%q}\n", pad)
+	}
+	_, _ = w.Write(out.Bytes())
 }
 
 // startHelperProcess spawns the test binary as a minimal pi stand-in with the
@@ -164,6 +187,57 @@ func TestWaitRepeatedCallers(t *testing.T) {
 		if results[i] == nil || results[i] != results[0] {
 			t.Errorf("caller %d result = %v, want the shared cached result %v", i, results[i], results[0])
 		}
+	}
+}
+
+// stallingWriter blocks its first Write until release is closed, so a test
+// can stall the client read loop on its first log record.
+type stallingWriter struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *stallingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() {
+		close(w.entered)
+		<-w.release
+	})
+	return len(p), nil
+}
+
+// TestRecordsBeforeExitAreDelivered proves records still in the pipe when the
+// child exits reach their consumers, and a clean exit is not reported as a
+// protocol failure.
+func TestRecordsBeforeExitAreDelivered(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("HELPER_MODE", "burst-then-exit")
+	// A -race child otherwise sleeps 1 s at exit, past the stall window below.
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
+	stall := &stallingWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	client, err := New(exe, []string{"-test.run=^TestHelperProcess$"},
+		WithLogger(slog.New(slog.NewTextHandler(stall, nil))),
+		WithStderr(io.Discard),
+	)
+	if err != nil {
+		t.Fatalf("New(helper): %v", err)
+	}
+	// The read loop stalls on the unknown-response log record. Give the child
+	// time to write its events and exit while they are still in the pipe, then
+	// release the read loop.
+	<-stall.entered
+	time.Sleep(500 * time.Millisecond)
+	close(stall.release)
+
+	if err := client.Wait(); err != nil {
+		t.Fatalf("Wait = %v, want nil for a clean exit", err)
+	}
+	if n := len(client.Events()); n != burstHelperEvents {
+		t.Fatalf("events delivered = %d, want %d", n, burstHelperEvents)
 	}
 }
 

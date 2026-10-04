@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 // Channel capacities for the event and extension UI streams. A full channel is
@@ -44,8 +45,14 @@ type Client struct {
 	events chan Event
 	ui     chan UIRequest
 
-	writeMu   sync.Mutex
-	stdinOpen bool
+	// writeMu serializes records on stdin. CloseStdin does not take it, so
+	// closing stdin releases a write blocked on a child that stopped reading.
+	writeMu     sync.Mutex
+	stdinClosed atomic.Bool
+
+	// readDone closes when readLoop returns. os/exec closes stdout in Wait, so
+	// Wait must not start before readLoop has drained it.
+	readDone chan struct{}
 
 	mu      sync.Mutex
 	nextID  uint64
@@ -94,7 +101,10 @@ func New(bin string, args []string, opts ...Option) (*Client, error) {
 	}
 	c := newClient(stdin, stdout, o.log, cmd.Process.Kill)
 	go c.readLoop()
-	go func() { c.finish(cmd.Wait()) }()
+	go func() {
+		<-c.readDone
+		c.finish(cmd.Wait())
+	}()
 	return c, nil
 }
 
@@ -102,15 +112,15 @@ func New(bin string, args []string, opts ...Option) (*Client, error) {
 // the process tests use it with a helper child.
 func newClient(stdin io.WriteCloser, stdout io.Reader, log *slog.Logger, kill func() error) *Client {
 	return &Client{
-		log:       log,
-		stdin:     stdin,
-		stdout:    stdout,
-		kill:      kill,
-		events:    make(chan Event, eventBuffer),
-		ui:        make(chan UIRequest, uiBuffer),
-		pending:   make(map[string]chan clientResult),
-		died:      make(chan struct{}),
-		stdinOpen: true,
+		log:      log,
+		stdin:    stdin,
+		stdout:   stdout,
+		kill:     kill,
+		events:   make(chan Event, eventBuffer),
+		ui:       make(chan UIRequest, uiBuffer),
+		pending:  make(map[string]chan clientResult),
+		readDone: make(chan struct{}),
+		died:     make(chan struct{}),
 	}
 }
 
@@ -122,8 +132,8 @@ func (c *Client) Events() <-chan Event { return c.events }
 // coordinator) must drain it; a full channel is a protocol integrity failure.
 func (c *Client) UIRequests() <-chan UIRequest { return c.ui }
 
-// Send sends one command and waits for its correlated response or ctx
-// cancellation. The command's ID, when empty, is assigned by the client.
+// Send sends one command and waits for its correlated response, the client's
+// terminal failure, or ctx cancellation. Send always assigns the request ID.
 func (c *Client) Send(ctx context.Context, cmd Command) (Response, error) {
 	cmd.ID = c.claimID()
 	ch := make(chan clientResult, 1)
@@ -138,6 +148,14 @@ func (c *Client) Send(ctx context.Context, cmd Command) (Response, error) {
 	select {
 	case r := <-ch:
 		return r.resp, r.err
+	case <-c.died:
+		// A response or failure queued before the client died wins.
+		select {
+		case r := <-ch:
+			return r.resp, r.err
+		default:
+		}
+		return Response{}, pendingErr(c.Wait())
 	case <-ctx.Done():
 		return Response{}, ctx.Err()
 	}
@@ -150,12 +168,9 @@ func (c *Client) AnswerUIDialog(_ context.Context, id string) error {
 
 // CloseStdin requests an orderly pi shutdown. It is idempotent.
 func (c *Client) CloseStdin() error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if !c.stdinOpen {
+	if c.stdinClosed.Swap(true) {
 		return nil
 	}
-	c.stdinOpen = false
 	return c.stdin.Close()
 }
 
@@ -197,7 +212,7 @@ func (c *Client) forget(id string) {
 func (c *Client) write(v any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if !c.stdinOpen {
+	if c.stdinClosed.Load() {
 		return errStdinClosed
 	}
 	return WriteRecord(c.stdin, v)
@@ -207,6 +222,7 @@ func (c *Client) write(v any) error {
 // stream ends or a protocol integrity failure occurs; it never drops a record
 // silently.
 func (c *Client) readLoop() {
+	defer close(c.readDone)
 	sc := NewScanner(c.stdout)
 	for {
 		rec, err := sc.Next()
@@ -311,13 +327,18 @@ func (c *Client) finish(err error) {
 		c.mu.Lock()
 		c.termErr = err
 		c.mu.Unlock()
-		fail := err
-		if fail == nil {
-			fail = ErrProcessExited
-		}
-		c.failPending(fail)
+		c.failPending(pendingErr(err))
 		close(c.died)
 	})
+}
+
+// pendingErr is the error a send observes when the client died before it got
+// a response.
+func pendingErr(termErr error) error {
+	if termErr == nil {
+		return ErrProcessExited
+	}
+	return termErr
 }
 
 // failPending fails every outstanding send. A response delivered by the read
