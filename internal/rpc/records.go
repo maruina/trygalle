@@ -5,15 +5,17 @@ import (
 	"fmt"
 )
 
-// Event type names the coordinator consumes from the Pi event stream.
+// State event types: the event types that change operation state. The client
+// delivers only these on Events(). Every other event type is activity only: it
+// updates LastActivity and is not delivered. Activity-only types include
+// message_start, the per-token message_update, tool execution progress, and
+// types that later Pi versions add.
 const (
 	EventAgentStart             = "agent_start"
 	EventAgentEnd               = "agent_end"
 	EventAgentSettled           = "agent_settled"
 	EventTurnStart              = "turn_start"
 	EventTurnEnd                = "turn_end"
-	EventMessageStart           = "message_start"
-	EventMessageUpdate          = "message_update"
 	EventMessageEnd             = "message_end"
 	EventCompactionStart        = "compaction_start"
 	EventCompactionEnd          = "compaction_end"
@@ -22,6 +24,18 @@ const (
 	EventAutoRetryEnd           = "auto_retry_end"
 	EventSummarizationScheduled = "summarization_retry_scheduled"
 )
+
+// isStateEvent reports whether eventType is a state event type.
+func isStateEvent(eventType string) bool {
+	switch eventType {
+	case EventAgentStart, EventAgentEnd, EventAgentSettled,
+		EventTurnStart, EventTurnEnd, EventMessageEnd,
+		EventCompactionStart, EventCompactionEnd, EventQueueUpdate,
+		EventAutoRetryStart, EventAutoRetryEnd, EventSummarizationScheduled:
+		return true
+	}
+	return false
+}
 
 // Extension UI record type names.
 const (

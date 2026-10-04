@@ -281,6 +281,52 @@ func TestFullEventChannelIsProtocolError(t *testing.T) {
 	}
 }
 
+// TestActivityOnlyEventsNotDelivered proves per-token and unconsumed event
+// types update LastActivity without filling the event channel, so a token
+// stream longer than the buffer is not a protocol integrity failure.
+func TestActivityOnlyEventsNotDelivered(t *testing.T) {
+	s := newScripted(t, discardLogger())
+	if a := s.client.LastActivity(); a != (Activity{}) {
+		t.Fatalf("LastActivity before any event = %+v, want zero", a)
+	}
+	start := time.Now()
+	go func() {
+		s.emit(`{"type":"message_start","message":{"role":"assistant"}}`)
+		for range eventBuffer + 10 {
+			s.emit(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"x"}}`)
+		}
+		s.emit(`{"type":"tool_execution_update","toolCallId":"t1"}`)
+		// A UI request marks the point where the read loop has processed
+		// every earlier record.
+		s.emit(`{"type":"extension_ui_request","id":"sync","method":"notify"}`)
+	}()
+	select {
+	case <-s.client.UIRequests():
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop did not reach the sync record")
+	}
+	if n := len(s.client.Events()); n != 0 {
+		t.Errorf("events delivered = %d, want 0 activity-only events delivered", n)
+	}
+	a := s.client.LastActivity()
+	if a.Type != "tool_execution_update" || a.At.Before(start) {
+		t.Errorf("LastActivity = %+v, want tool_execution_update after %v", a, start)
+	}
+
+	s.emit(`{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"boom"}}`)
+	select {
+	case e := <-s.client.Events():
+		if e.Type != EventMessageEnd || e.Message == nil || e.Message.StopReason != "error" {
+			t.Errorf("event = %+v, want message_end with the failure fields", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("message_end was not delivered")
+	}
+	if a := s.client.LastActivity(); a.Type != EventMessageEnd {
+		t.Errorf("LastActivity type = %q, want %q", a.Type, EventMessageEnd)
+	}
+}
+
 // TestScriptedCloseStdin stops future writes and is idempotent.
 func TestScriptedCloseStdin(t *testing.T) {
 	s := newScripted(t, discardLogger())

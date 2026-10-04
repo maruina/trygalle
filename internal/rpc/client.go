@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Channel capacities for the event and extension UI streams. A full channel is
@@ -33,10 +34,18 @@ type clientResult struct {
 	err  error
 }
 
+// Activity is the most recent session event the client observed. It carries
+// metadata only, never record content. The zero value means no event yet.
+type Activity struct {
+	Type string    // event type, e.g. "message_update"
+	At   time.Time // when the client read the event
+}
+
 // Client controls one pi rpc subprocess over strict JSONL on stdin/stdout.
 // A read goroutine always drains stdout so pi is never stalled, routes
-// responses to pending sends by request ID, and delivers session and
-// extension UI records on buffered channels.
+// responses to pending sends by request ID, delivers state events and
+// extension UI records on buffered channels, and records every session event
+// as the last activity.
 type Client struct {
 	log    *slog.Logger
 	stdin  io.WriteCloser
@@ -61,6 +70,9 @@ type Client struct {
 	dieOnce sync.Once
 	died    chan struct{}
 	termErr error
+
+	activityMu sync.Mutex
+	activity   Activity
 }
 
 // Option configures a Client.
@@ -124,13 +136,23 @@ func newClient(stdin io.WriteCloser, stdout io.Reader, log *slog.Logger, kill fu
 	}
 }
 
-// Events returns the session event stream. One consumer (the runtime
-// coordinator) must drain it; a full channel is a protocol integrity failure.
+// Events returns the state event stream (see isStateEvent). One consumer (the
+// runtime coordinator) must drain it; a full channel is a protocol integrity
+// failure.
 func (c *Client) Events() <-chan Event { return c.events }
 
 // UIRequests returns the extension UI request stream. One consumer (the runtime
 // coordinator) must drain it; a full channel is a protocol integrity failure.
 func (c *Client) UIRequests() <-chan UIRequest { return c.ui }
+
+// LastActivity returns the type and arrival time of the most recent session
+// event of any type, including activity-only events that Events does not
+// deliver.
+func (c *Client) LastActivity() Activity {
+	c.activityMu.Lock()
+	defer c.activityMu.Unlock()
+	return c.activity
+}
 
 // Send sends one command and waits for its correlated response, the client's
 // terminal failure, or ctx cancellation. Send always assigns the request ID.
@@ -260,6 +282,10 @@ func (c *Client) readLoop() {
 			// extension_ui_response is noise, not a protocol violation.
 			c.log.Warn("unexpected extension_ui_response from pi")
 		default:
+			c.recordActivity(head.Type)
+			if !isStateEvent(head.Type) {
+				continue
+			}
 			var e Event
 			if err := DecodeRecord(rec, &e); err != nil {
 				c.fatal(err)
@@ -293,6 +319,12 @@ func (c *Client) dispatchResponse(r Response) {
 		// further owner.
 		c.log.Warn("response arrived after its request completed", "id", r.ID)
 	}
+}
+
+func (c *Client) recordActivity(eventType string) {
+	c.activityMu.Lock()
+	defer c.activityMu.Unlock()
+	c.activity = Activity{Type: eventType, At: time.Now()}
 }
 
 func (c *Client) deliverEvent(e Event) {

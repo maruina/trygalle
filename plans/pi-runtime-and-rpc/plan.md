@@ -123,7 +123,7 @@ A `parse` response has no `id`: `{"type":"response","command":"parse","success":
 - `get_commands` (send): response `data.commands` is a non-empty list of `{name, description?, source: "extension"|"prompt"|"skill", sourceInfo}`.
 - `get_last_assistant_text` (send): response `data` = `{"text":"..."}`; `text` is `null` when no assistant text exists.
 
-**Events consumed by Trygalle** (no `id`): `agent_start`; `agent_end` with `messages` and `willRetry`; `agent_settled`; `turn_start`; `turn_end` with `message`; `message_start`/`message_update`/`message_end` with `message`; compaction events; retry events; queue events. The coordinator uses events for terminal-state classification and heartbeat activity only, never for final text.
+**Events consumed by Trygalle** (no `id`): `agent_start`; `agent_end` with `messages` and `willRetry`; `agent_settled`; `turn_start`; `turn_end` with `message`; `message_end` with `message`; compaction events; retry events; queue events. The client delivers only these state events on `Events()`. Every other event type (`message_start`, the per-token `message_update`, tool execution progress, and types later Pi versions add) is activity only: it updates `LastActivity()` and is not delivered, so a long token stream cannot fill the event buffer. The coordinator uses events for terminal-state classification and `LastActivity()` for the heartbeat, never for final text.
 
 **Assistant message failure fields** (inside `message` and `agent_end.messages`): `stopReason` ∈ `"pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred"` and optional `errorMessage`. A failed run is classified from the last assistant message with `stopReason: "error"` and its `errorMessage`.
 
@@ -150,7 +150,8 @@ type PiClient interface {
 	ClearQueue(ctx context.Context) (QueueContents, error)
 	NewSession(ctx context.Context) (cancelled bool, err error)
 	GetLastAssistantText(ctx context.Context) (*string, error) // nil pointer == JSON null
-	Events() <-chan Event // one coordinator consumer
+	Events() <-chan Event // state events only; one coordinator consumer
+	LastActivity() Activity // type and arrival time of the most recent event of any type
 	UIRequests() <-chan UIRequest // one coordinator consumer
 	AnswerUIDialog(ctx context.Context, id string) error // extension_ui_response with cancelled: true
 	CloseStdin() error
@@ -390,7 +391,7 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 **Traces to:** R2, R16
 **Files:** `internal/rpc/client.go`, `internal/rpc/client_test.go`
 
-- [x] Implement `Client`: start the process (`exec.Command`); a read goroutine that always drains stdout, decodes records, routes responses by ID to waiting `Send` calls, and delivers events and UI requests on buffered channels (event buffer 1024; a full channel is a `ProtocolError`, never a drop); connect stderr to a separate diagnostic writer (default `os.Stderr`), never the protocol parser. Own one `cmd.Wait()` goroutine; make process exit fail pending sends and publish one cached terminal result to every `Wait` caller.
+- [x] Implement `Client`: start the process (`exec.Command`); a read goroutine that always drains stdout, decodes records, routes responses by ID to waiting `Send` calls, and delivers state events and UI requests on buffered channels (event buffer 1024; a full channel is a `ProtocolError`, never a drop); record every event's type and arrival time as `LastActivity()` and do not deliver activity-only event types; connect stderr to a separate diagnostic writer (default `os.Stderr`), never the protocol parser. Own one `cmd.Wait()` goroutine; make process exit fail pending sends and publish one cached terminal result to every `Wait` caller.
 - [x] Establish the events/UI subscriptions at construction, before any `Send` can run.
 - [x] Implement `Send` with a per-call `context.Context` deadline and unique incrementing IDs. Implement `AnswerUIDialog` (`extension_ui_response` with `cancelled: true`), `CloseStdin`, and idempotent `Kill` for a child that misses its bounded graceful-exit deadline.
 - [x] Route a `parse` response (no ID) to a log record, not an error.
@@ -500,7 +501,7 @@ Delivers the coordinator that routes every message and produces a visible outcom
 **Traces to:** R10
 **Files:** `internal/runtime/heartbeat.go`, `internal/runtime/heartbeat_test.go`
 
-- [ ] While Running, tick every `HeartbeatInterval`: record elapsed time, the type and age of the last observed event (metadata only, no content), and an abort hint; emit a `Heartbeat` notice. Stop ticking on every terminal state.
+- [ ] While Running, tick every `HeartbeatInterval`: record elapsed time, the type and age of the last observed event from `LastActivity()` (metadata only, no content), and an abort hint; emit a `Heartbeat` notice. Stop ticking on every terminal state.
 - [ ] Unit-test with a tiny configured interval and a delayed fake run: exactly one notice per interval elapse, correct last-event metadata, ticking stops after settlement.
 - [ ] Run `go test ./internal/runtime/`; expect green.
 - [ ] Commit with `feat: add operation heartbeat`.

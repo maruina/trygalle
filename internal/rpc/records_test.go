@@ -345,7 +345,7 @@ func TestEventDecode(t *testing.T) {
 		if err := json.Unmarshal([]byte(golden), &e); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if e.Type != EventMessageUpdate {
+		if e.Type != "message_update" {
 			t.Errorf("type = %q", e.Type)
 		}
 	})

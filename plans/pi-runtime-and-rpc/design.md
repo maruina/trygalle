@@ -137,7 +137,7 @@ Every terminal state produces a visible Telegram outcome. The interface is not t
 ### Heartbeat
 There is no watchdog deadline. A model call may legitimately take minutes, and an automatic abort would kill legitimate work; `/abort` is the only operation terminator, matching TUI parity (Esc is the user's timeout).
 
-While an operation is active, the coordinator emits a heartbeat system notice every 5 minutes (one configurable constant): elapsed time, the type and age of the last observed event (metadata only, no content), and an `/abort` hint. The coordinator already consumes every event for attribution, so the activity signal is nearly free. A long silence appears as "no activity for X minutes" in the same notice; the judgment and the abort stay with the user.
+While an operation is active, the coordinator emits a heartbeat system notice every 5 minutes (one configurable constant): elapsed time, the type and age of the last observed event (metadata only, no content), and an `/abort` hint. The RPC client records the type and arrival time of every event, including the per-token updates it does not deliver to the coordinator, so the activity signal is nearly free. A long silence appears as "no activity for X minutes" in the same notice; the judgment and the abort stay with the user.
 
 ### Shutdown
 On SIGTERM (rollouts, evictions):
