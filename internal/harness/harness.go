@@ -1,0 +1,126 @@
+// Package harness starts the pinned pi version for live contract tests under a
+// hermetic environment: temporary agent and session directories, offline mode,
+// and a version gate that matches the TRYGALLE_PI_* test configuration.
+package harness
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/maruina/trygalle/internal/rpc"
+)
+
+// PinnedPiVersion is the only pi release the contract tests run against. It is
+// the upgrade evidence gate: bumping pi requires this constant and the whole
+// live suite to move together.
+const (
+	PinnedPiVersion = "1.0.1"
+	envTests        = "TRYGALLE_PI_TESTS"
+	envBin          = "TRYGALLE_PI_BIN"
+)
+
+// TRYGALLE_PI_TESTS mode values.
+const (
+	ModeAuto = "auto" // default: run with Pi 1.0.1 available; skip with instructions otherwise
+	ModeOn   = "on"   // fail when unavailable or the version differs from the pin
+	ModeOff  = "off"  // always skip, before any binary lookup
+)
+
+// resolveResult carries the gate decision as pure data so the unit tests can
+// exercise every branch without test-control flow tricks.
+type resolveResult struct {
+	mode        string
+	bin         string
+	version     string
+	unavailable bool
+}
+
+// resolveGate reads the test configuration and the pinned pi binary. It returns
+// an error only for conditions that must fail the test: `on` with an
+// unavailable binary, any mode with a version mismatch, or an unknown mode.
+func resolveGate() (resolveResult, error) {
+	mode := os.Getenv(envTests)
+	if mode == "" {
+		mode = ModeAuto
+	}
+	switch mode {
+	case ModeOff:
+		return resolveResult{mode: mode}, nil
+	case ModeOn, ModeAuto:
+	default:
+		return resolveResult{}, fmt.Errorf("invalid TRYGALLE_PI_TESTS %q (want %s, %s, or %s)", mode, ModeAuto, ModeOn, ModeOff)
+	}
+	bin := os.Getenv(envBin)
+	if bin == "" {
+		bin = "pi"
+	}
+	out, runErr := exec.Command(bin, "--version").CombinedOutput()
+	version := strings.TrimSpace(string(out))
+	if runErr != nil {
+		if mode == ModeOn {
+			return resolveResult{}, fmt.Errorf("pi binary %q unavailable (TRYGALLE_PI_TESTS=%s): %v", bin, mode, runErr)
+		}
+		return resolveResult{mode: mode, unavailable: true}, nil
+	}
+	if version != PinnedPiVersion {
+		return resolveResult{}, fmt.Errorf("pi version %q does not match the pinned version %s", version, PinnedPiVersion)
+	}
+	return resolveResult{mode: mode, bin: bin, version: version}, nil
+}
+
+// Pi resolves the pinned pi binary per the TRYGALLE_PI_TESTS gate: it returns
+// the binary path to use, skips the test with instructions when the binary is
+// unavailable in auto mode, and fails the test for `on` and version mismatches.
+func Pi(t *testing.T) string {
+	t.Helper()
+	res, err := resolveGate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch res.mode {
+	case ModeOff:
+		t.Skip("live tests disabled (TRYGALLE_PI_TESTS=off)")
+	case ModeAuto:
+		if res.unavailable {
+			t.Skipf("live tests need the pinned pi %s binary on PATH or TRYGALLE_PI_BIN", PinnedPiVersion)
+		}
+	case ModeOn:
+		// unavailable already failed in resolveGate.
+	}
+	return res.bin
+}
+
+// Start launches the given pinned pi binary in rpc mode under a hermetic
+// environment and returns the connected client. It registers a bounded stop on
+// test cleanup: close stdin, wait briefly, then kill.
+func Start(t *testing.T, bin string, args ...string) *rpc.Client {
+	t.Helper()
+	if len(args) == 0 {
+		args = []string{"--mode", "rpc", "--session-dir", t.TempDir()}
+	}
+	// These are process-wide; live tests never run in parallel.
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+	t.Setenv("PI_SKIP_VERSION_CHECK", "1")
+	t.Setenv("PI_OFFLINE", "1")
+
+	client, err := rpc.New(bin, args)
+	if err != nil {
+		t.Fatalf("start pi: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = client.CloseStdin()
+		waitErr := make(chan error, 1)
+		go func() { waitErr <- client.Wait() }()
+		select {
+		case <-waitErr:
+		case <-time.After(5 * time.Second):
+			_ = client.Kill()
+			<-waitErr
+		}
+	})
+	return client
+}
