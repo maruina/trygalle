@@ -167,19 +167,27 @@ func (c *Client) Send(ctx context.Context, cmd Command) (Response, error) {
 	if err := c.write(cmd); err != nil {
 		return Response{}, err
 	}
+	return c.awaitResponse(ctx, ch)
+}
+
+func (c *Client) awaitResponse(ctx context.Context, ch <-chan clientResult) (Response, error) {
 	select {
 	case r := <-ch:
 		return r.resp, r.err
 	case <-c.died:
-		// A response or failure queued before the client died wins.
-		select {
-		case r := <-ch:
-			return r.resp, r.err
-		default:
-		}
-		return Response{}, pendingErr(c.Wait())
+		return c.responseOrTerminal(ch)
 	case <-ctx.Done():
 		return Response{}, ctx.Err()
+	}
+}
+
+// responseOrTerminal gives a queued response precedence over process death.
+func (c *Client) responseOrTerminal(ch <-chan clientResult) (Response, error) {
+	select {
+	case r := <-ch:
+		return r.resp, r.err
+	default:
+		return Response{}, pendingErr(c.Wait())
 	}
 }
 
@@ -245,55 +253,89 @@ func (c *Client) write(v any) error {
 // silently.
 func (c *Client) readLoop() {
 	defer close(c.readDone)
-	sc := NewScanner(c.stdout)
+	scanner := NewScanner(c.stdout)
 	for {
-		rec, err := sc.Next()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			c.fatal(fmt.Errorf("read pi stdout: %w", err))
+		err := c.readNextRecord(scanner)
+		if errors.Is(err, io.EOF) {
 			return
 		}
-		var head struct {
-			Type string `json:"type"`
-		}
-		if err := DecodeRecord(rec, &head); err != nil {
+		if err != nil {
 			c.fatal(err)
 			return
 		}
-		switch head.Type {
-		case "response":
-			var r Response
-			if err := DecodeRecord(rec, &r); err != nil {
-				c.fatal(err)
-				return
-			}
-			c.dispatchResponse(r)
-		case UIRequestType:
-			var u UIRequest
-			if err := DecodeRecord(rec, &u); err != nil {
-				c.fatal(err)
-				return
-			}
-			c.deliverUI(u)
-		case UIResponseType:
-			// Pi never answers a request we did not send; an unexpected
-			// extension_ui_response is noise, not a protocol violation.
-			c.log.Warn("unexpected extension_ui_response from pi")
-		default:
-			c.recordActivity(head.Type)
-			if !isStateEvent(head.Type) {
-				continue
-			}
-			var e Event
-			if err := DecodeRecord(rec, &e); err != nil {
-				c.fatal(err)
-				return
-			}
-			c.deliverEvent(e)
-		}
 	}
+}
+
+func (c *Client) readNextRecord(scanner *Scanner) error {
+	rec, err := scanner.Next()
+	if err != nil && !errors.Is(err, io.EOF) {
+		err = fmt.Errorf("read pi stdout: %w", err)
+	}
+	if err != nil {
+		return err
+	}
+	return c.dispatchRecord(rec)
+}
+
+func (c *Client) dispatchRecord(rec []byte) error {
+	typeName, err := recordType(rec)
+	if err != nil {
+		return err
+	}
+	switch typeName {
+	case "response":
+		err = c.dispatchResponseRecord(rec)
+	case UIRequestType:
+		err = c.dispatchUIRequestRecord(rec)
+	case UIResponseType:
+		// Pi never answers a request we did not send; an unexpected
+		// extension_ui_response is noise, not a protocol violation.
+		c.log.Warn("unexpected extension_ui_response from pi")
+	default:
+		err = c.dispatchEventRecord(rec, typeName)
+	}
+	return err
+}
+
+func recordType(rec []byte) (string, error) {
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := DecodeRecord(rec, &head); err != nil {
+		return "", err
+	}
+	return head.Type, nil
+}
+
+func (c *Client) dispatchResponseRecord(rec []byte) error {
+	var response Response
+	if err := DecodeRecord(rec, &response); err != nil {
+		return err
+	}
+	c.dispatchResponse(response)
+	return nil
+}
+
+func (c *Client) dispatchUIRequestRecord(rec []byte) error {
+	var request UIRequest
+	if err := DecodeRecord(rec, &request); err != nil {
+		return err
+	}
+	c.deliverUI(request)
+	return nil
+}
+
+func (c *Client) dispatchEventRecord(rec []byte, eventType string) error {
+	c.recordActivity(eventType)
+	if !isStateEvent(eventType) {
+		return nil
+	}
+	var event Event
+	if err := DecodeRecord(rec, &event); err != nil {
+		return err
+	}
+	c.deliverEvent(event)
+	return nil
 }
 
 func (c *Client) dispatchResponse(r Response) {

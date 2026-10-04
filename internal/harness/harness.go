@@ -46,21 +46,24 @@ type resolveResult struct {
 	skipReason string
 }
 
+type piVersionCheck struct {
+	mode    string
+	bin     string
+	version string
+	err     error
+}
+
 // resolveGate reads the test configuration and the pinned pi binary. It returns
 // an error only for conditions that must fail the test: `on` with a missing
 // binary or a version mismatch, a binary that exists but cannot report its
 // version, or an unknown mode.
 func resolveGate() (resolveResult, error) {
-	mode := os.Getenv(envTests)
-	if mode == "" {
-		mode = ModeAuto
+	mode, err := configuredMode()
+	if err != nil {
+		return resolveResult{}, err
 	}
-	switch mode {
-	case ModeOff:
+	if mode == ModeOff {
 		return resolveResult{mode: mode, skipReason: "live tests disabled (TRYGALLE_PI_TESTS=off)"}, nil
-	case ModeOn, ModeAuto:
-	default:
-		return resolveResult{}, fmt.Errorf("invalid TRYGALLE_PI_TESTS %q (want %s, %s, or %s)", mode, ModeAuto, ModeOn, ModeOff)
 	}
 	bin := os.Getenv(envBin)
 	if bin == "" {
@@ -69,25 +72,54 @@ func resolveGate() (resolveResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
 	defer cancel()
 	out, runErr := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
-	version := strings.TrimSpace(string(out))
-	if runErr != nil {
-		if !errors.Is(runErr, exec.ErrNotFound) && !errors.Is(runErr, fs.ErrNotExist) {
-			return resolveResult{}, fmt.Errorf("pi binary %q failed to report its version: %v", bin, runErr)
-		}
-		if mode == ModeOn {
-			return resolveResult{}, fmt.Errorf("pi binary %q unavailable (TRYGALLE_PI_TESTS=%s): %v", bin, mode, runErr)
-		}
-		return resolveResult{mode: mode, skipReason: fmt.Sprintf(
-			"live tests need the pinned pi %s binary on PATH or TRYGALLE_PI_BIN", PinnedPiVersion)}, nil
+	return classifyGate(piVersionCheck{
+		mode:    mode,
+		bin:     bin,
+		version: strings.TrimSpace(string(out)),
+		err:     runErr,
+	})
+}
+
+func configuredMode() (string, error) {
+	mode := os.Getenv(envTests)
+	if mode == "" {
+		mode = ModeAuto
 	}
-	if version != PinnedPiVersion {
-		if mode == ModeOn {
-			return resolveResult{}, fmt.Errorf("pi version %q does not match the pinned version %s", version, PinnedPiVersion)
-		}
-		return resolveResult{mode: mode, version: version, skipReason: fmt.Sprintf(
-			"live tests need pi %s; %q reports %q (TRYGALLE_PI_TESTS=on fails instead)", PinnedPiVersion, bin, version)}, nil
+	switch mode {
+	case ModeOff, ModeOn, ModeAuto:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid TRYGALLE_PI_TESTS %q (want %s, %s, or %s)", mode, ModeAuto, ModeOn, ModeOff)
 	}
-	return resolveResult{mode: mode, bin: bin, version: version}, nil
+}
+
+func classifyGate(check piVersionCheck) (resolveResult, error) {
+	if check.err != nil {
+		if errors.Is(check.err, exec.ErrNotFound) || errors.Is(check.err, fs.ErrNotExist) {
+			return unavailablePi(check)
+		}
+		return resolveResult{}, fmt.Errorf("pi binary %q failed to report its version: %v", check.bin, check.err)
+	}
+	if check.version != PinnedPiVersion {
+		return versionMismatch(check)
+	}
+	return resolveResult{mode: check.mode, bin: check.bin, version: check.version}, nil
+}
+
+func unavailablePi(check piVersionCheck) (resolveResult, error) {
+	if check.mode == ModeOn {
+		return resolveResult{}, fmt.Errorf("pi binary %q unavailable (TRYGALLE_PI_TESTS=%s): %v", check.bin, check.mode, check.err)
+	}
+	return resolveResult{mode: check.mode, skipReason: fmt.Sprintf(
+		"live tests need the pinned pi %s binary on PATH or TRYGALLE_PI_BIN", PinnedPiVersion)}, nil
+}
+
+func versionMismatch(check piVersionCheck) (resolveResult, error) {
+	if check.mode == ModeOn {
+		return resolveResult{}, fmt.Errorf("pi version %q does not match the pinned version %s", check.version, PinnedPiVersion)
+	}
+	return resolveResult{mode: check.mode, version: check.version, skipReason: fmt.Sprintf(
+		"live tests need pi %s; %q reports %q (TRYGALLE_PI_TESTS=on fails instead)", PinnedPiVersion, check.bin, check.version)}, nil
 }
 
 // Pi resolves the pinned pi binary per the TRYGALLE_PI_TESTS gate: it returns

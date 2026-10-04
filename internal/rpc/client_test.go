@@ -154,6 +154,23 @@ func TestSendCorrelatesResponse(t *testing.T) {
 	}
 }
 
+// TestSendResponseQueuedBeforeDeathWins proves a queued response beats process death.
+func TestSendResponseQueuedBeforeDeathWins(t *testing.T) {
+	client := &Client{died: make(chan struct{})}
+	responseCh := make(chan clientResult, 1)
+	want := Response{ID: "req-1", Type: "response", Command: "get_state", Success: true}
+	responseCh <- clientResult{resp: want}
+	client.finish(errors.New("process exited"))
+
+	got, err := client.awaitResponse(context.Background(), responseCh)
+	if err != nil {
+		t.Fatalf("awaitResponse error: %v", err)
+	}
+	if got.ID != want.ID || got.Command != want.Command || !got.Success {
+		t.Errorf("response = %+v, want %+v", got, want)
+	}
+}
+
 // TestDeadlineExpiry proves a caller-supplied deadline bounds each command.
 func TestDeadlineExpiry(t *testing.T) {
 	s := newScripted(t, discardLogger())

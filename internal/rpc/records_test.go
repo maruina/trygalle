@@ -107,248 +107,238 @@ func TestResponseEnvelopeDecode(t *testing.T) {
 	})
 }
 
-func TestCommandDataDecode(t *testing.T) {
-	t.Run("all dispositions", func(t *testing.T) {
-		for _, want := range []Disposition{DispositionStarted, DispositionQueued, DispositionHandled} {
-			golden := `{"disposition":"` + string(want) + `"}`
-			var d PromptData
-			if err := json.Unmarshal([]byte(golden), &d); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			if d.Disposition != want {
-				t.Errorf("disposition = %q, want %q", d.Disposition, want)
-			}
-		}
-	})
-
-	t.Run("clear_queue contents", func(t *testing.T) {
-		golden := `{"steering":["Change direction"],"followUp":["Summarize when finished"]}`
-		var d QueueContents
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
+func TestPromptDataDecode(t *testing.T) {
+	for _, want := range []Disposition{DispositionStarted, DispositionQueued, DispositionHandled} {
+		golden := `{"disposition":"` + string(want) + `"}`
+		var data PromptData
+		if err := json.Unmarshal([]byte(golden), &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if len(d.Steering) != 1 || d.Steering[0] != "Change direction" {
-			t.Errorf("steering = %v", d.Steering)
+		if data.Disposition != want {
+			t.Errorf("disposition = %q, want %q", data.Disposition, want)
 		}
-		if len(d.FollowUp) != 1 || d.FollowUp[0] != "Summarize when finished" {
-			t.Errorf("followUp = %v", d.FollowUp)
-		}
-	})
-
-	t.Run("new_session cancelled true and false", func(t *testing.T) {
-		for _, want := range []bool{false, true} {
-			golden := `{"cancelled":`
-			if want {
-				golden += `true`
-			} else {
-				golden += `false`
-			}
-			golden += `}`
-			var d NewSessionData
-			if err := json.Unmarshal([]byte(golden), &d); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			if d.Cancelled != want {
-				t.Errorf("cancelled = %v, want %v", d.Cancelled, want)
-			}
-		}
-	})
-
-	t.Run("get_state full", func(t *testing.T) {
-		golden := `{"model":{"id":"mock-model","name":"Mock","api":"openai-completions","provider":"mock","baseUrl":"http://127.0.0.1:1"},"thinkingLevel":"medium","isStreaming":true,"isCompacting":false,"sessionFile":"/tmp/sessions/s.jsonl","sessionId":"abc123","messageCount":5,"pendingMessageCount":2}`
-		var d State
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if d.SessionID != "abc123" || d.SessionFile != "/tmp/sessions/s.jsonl" {
-			t.Errorf("session fields wrong: %+v", d)
-		}
-		if !d.IsStreaming || d.IsCompacting {
-			t.Errorf("streaming flags wrong: %+v", d)
-		}
-		if d.PendingMessageCount != 2 || d.MessageCount != 5 {
-			t.Errorf("counts wrong: %+v", d)
-		}
-		if d.Model == nil || d.Model.ID != "mock-model" || d.Model.Provider != "mock" {
-			t.Errorf("model wrong: %+v", d.Model)
-		}
-	})
-
-	t.Run("get_state without model", func(t *testing.T) {
-		golden := `{"isStreaming":false,"isCompacting":false,"sessionId":"abc123","messageCount":0,"pendingMessageCount":0}`
-		var d State
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if d.Model != nil {
-			t.Errorf("model = %+v, want nil", d.Model)
-		}
-	})
-
-	t.Run("get_commands list", func(t *testing.T) {
-		golden := `{"commands":[{"name":"fix-tests","description":"Fix failing tests","source":"prompt","sourceInfo":{"path":"/p/fix-tests.md","source":"local","scope":"project","origin":"top-level"}}]}`
-		var d CommandsData
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if len(d.Commands) != 1 {
-			t.Fatalf("commands = %d, want 1", len(d.Commands))
-		}
-		c := d.Commands[0]
-		if c.Name != "fix-tests" || c.Description != "Fix failing tests" || c.Source != "prompt" {
-			t.Errorf("command info wrong: %+v", c)
-		}
-		if len(c.SourceInfo) == 0 {
-			t.Error("sourceInfo not preserved")
-		}
-	})
-
-	t.Run("last assistant text null", func(t *testing.T) {
-		golden := `{"text":null}`
-		var d LastAssistantTextData
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if d.Text != nil {
-			t.Errorf("text = %v, want nil", *d.Text)
-		}
-	})
-
-	t.Run("last assistant text empty string", func(t *testing.T) {
-		golden := `{"text":""}`
-		var d LastAssistantTextData
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if d.Text == nil || *d.Text != "" {
-			t.Errorf("text = %v, want empty string", d.Text)
-		}
-	})
-
-	t.Run("last assistant text omitted", func(t *testing.T) {
-		// Live Pi 1.0.1 returns data {} when no assistant text exists.
-		golden := `{}`
-		var d LastAssistantTextData
-		if err := json.Unmarshal([]byte(golden), &d); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if d.Text != nil {
-			t.Errorf("text = %v, want nil for omitted field", *d.Text)
-		}
-	})
+	}
 }
 
-func TestEventDecode(t *testing.T) {
-	t.Run("agent_start", func(t *testing.T) {
-		var e Event
-		if err := json.Unmarshal([]byte(`{"type":"agent_start"}`), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventAgentStart {
-			t.Errorf("type = %q", e.Type)
-		}
-	})
+func TestQueueContentsDecode(t *testing.T) {
+	golden := `{"steering":["Change direction"],"followUp":["Summarize when finished"]}`
+	var data QueueContents
+	if err := json.Unmarshal([]byte(golden), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(data.Steering) != 1 || data.Steering[0] != "Change direction" {
+		t.Errorf("steering = %v", data.Steering)
+	}
+	if len(data.FollowUp) != 1 || data.FollowUp[0] != "Summarize when finished" {
+		t.Errorf("followUp = %v", data.FollowUp)
+	}
+}
 
-	t.Run("agent_end with messages and willRetry false", func(t *testing.T) {
-		golden := `{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"boom","timestamp":1}],"willRetry":false}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
+func TestNewSessionDataDecode(t *testing.T) {
+	for _, want := range []bool{false, true} {
+		golden := `{"cancelled":false}`
+		if want {
+			golden = `{"cancelled":true}`
+		}
+		var data NewSessionData
+		if err := json.Unmarshal([]byte(golden), &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if e.Type != EventAgentEnd || e.WillRetry {
-			t.Errorf("agent_end fields wrong: %+v", e)
+		if data.Cancelled != want {
+			t.Errorf("cancelled = %v, want %v", data.Cancelled, want)
 		}
-		if len(e.Messages) != 1 {
-			t.Fatalf("messages = %d, want 1", len(e.Messages))
-		}
-		m := e.Messages[0]
-		if m.Role != "assistant" || m.StopReason != "error" || m.ErrorMessage != "boom" {
-			t.Errorf("message wrong: %+v", m)
-		}
-	})
+	}
+}
 
-	t.Run("agent_settled", func(t *testing.T) {
-		var e Event
-		if err := json.Unmarshal([]byte(`{"type":"agent_settled"}`), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventAgentSettled {
-			t.Errorf("type = %q", e.Type)
-		}
-	})
+func TestStateDecodeFull(t *testing.T) {
+	golden := `{"model":{"id":"mock-model","name":"Mock","api":"openai-completions","provider":"mock","baseUrl":"http://127.0.0.1:1"},"thinkingLevel":"medium","isStreaming":true,"isCompacting":false,"sessionFile":"/tmp/sessions/s.jsonl","sessionId":"abc123","messageCount":5,"pendingMessageCount":2}`
+	var data State
+	if err := json.Unmarshal([]byte(golden), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.SessionID != "abc123" || data.SessionFile != "/tmp/sessions/s.jsonl" {
+		t.Errorf("session fields wrong: %+v", data)
+	}
+	if !data.IsStreaming || data.IsCompacting {
+		t.Errorf("streaming flags wrong: %+v", data)
+	}
+	if data.PendingMessageCount != 2 || data.MessageCount != 5 {
+		t.Errorf("counts wrong: %+v", data)
+	}
+	if data.Model == nil || data.Model.ID != "mock-model" || data.Model.Provider != "mock" {
+		t.Errorf("model wrong: %+v", data.Model)
+	}
+}
 
-	t.Run("message_end with failed assistant message", func(t *testing.T) {
-		golden := `{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"Provider error","timestamp":1}}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventMessageEnd || e.Message == nil {
-			t.Fatalf("message_end wrong: %+v", e)
-		}
-		if e.Message.StopReason != "error" || e.Message.ErrorMessage != "Provider error" {
-			t.Errorf("message wrong: %+v", e.Message)
-		}
-	})
+func TestStateDecodeWithoutModel(t *testing.T) {
+	golden := `{"isStreaming":false,"isCompacting":false,"sessionId":"abc123","messageCount":0,"pendingMessageCount":0}`
+	var data State
+	if err := json.Unmarshal([]byte(golden), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.Model != nil {
+		t.Errorf("model = %+v, want nil", data.Model)
+	}
+}
 
-	t.Run("compaction_start", func(t *testing.T) {
-		var e Event
-		if err := json.Unmarshal([]byte(`{"type":"compaction_start","reason":"threshold"}`), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventCompactionStart || e.Reason != "threshold" {
-			t.Errorf("compaction_start wrong: %+v", e)
-		}
-	})
+func TestCommandsDataDecode(t *testing.T) {
+	golden := `{"commands":[{"name":"fix-tests","description":"Fix failing tests","source":"prompt","sourceInfo":{"path":"/p/fix-tests.md","source":"local","scope":"project","origin":"top-level"}}]}`
+	var data CommandsData
+	if err := json.Unmarshal([]byte(golden), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(data.Commands) != 1 {
+		t.Fatalf("commands = %d, want 1", len(data.Commands))
+	}
+	command := data.Commands[0]
+	if command.Name != "fix-tests" || command.Description != "Fix failing tests" || command.Source != "prompt" {
+		t.Errorf("command info wrong: %+v", command)
+	}
+	if len(command.SourceInfo) == 0 {
+		t.Error("sourceInfo not preserved")
+	}
+}
 
-	t.Run("compaction_end", func(t *testing.T) {
-		golden := `{"type":"compaction_end","reason":"threshold","result":{"summary":"..."},"aborted":false,"willRetry":false}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventCompactionEnd || e.Reason != "threshold" || len(e.Result) == 0 {
-			t.Errorf("compaction_end wrong: %+v", e)
-		}
-	})
+func TestLastAssistantTextNull(t *testing.T) {
+	var data LastAssistantTextData
+	if err := json.Unmarshal([]byte(`{"text":null}`), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.Text != nil {
+		t.Errorf("text = %v, want nil", *data.Text)
+	}
+}
 
-	t.Run("queue_update", func(t *testing.T) {
-		golden := `{"type":"queue_update","steering":["one"],"followUp":["two","three"]}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if len(e.Steering) != 1 || e.Steering[0] != "one" {
-			t.Errorf("steering wrong: %v", e.Steering)
-		}
-		if len(e.FollowUp) != 2 || e.FollowUp[1] != "three" {
-			t.Errorf("followUp wrong: %v", e.FollowUp)
-		}
-	})
+func TestLastAssistantTextEmpty(t *testing.T) {
+	var data LastAssistantTextData
+	if err := json.Unmarshal([]byte(`{"text":""}`), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.Text == nil || *data.Text != "" {
+		t.Errorf("text = %v, want empty string", data.Text)
+	}
+}
 
-	t.Run("auto_retry_start", func(t *testing.T) {
-		golden := `{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"529 overloaded"}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != EventAutoRetryStart || e.ErrorMessage != "529 overloaded" {
-			t.Errorf("auto_retry_start wrong: %+v", e)
-		}
-	})
+func TestLastAssistantTextOmitted(t *testing.T) {
+	// Live Pi 1.0.1 returns data {} when no assistant text exists.
+	var data LastAssistantTextData
+	if err := json.Unmarshal([]byte(`{}`), &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.Text != nil {
+		t.Errorf("text = %v, want nil for omitted field", *data.Text)
+	}
+}
 
-	t.Run("unrelated fields are dropped", func(t *testing.T) {
-		// message_update carries usage and assistantMessageEvent; the component
-		// must not retain them.
-		golden := `{"type":"message_update","usage":{"input":100,"output":1,"totalTokens":101},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello "}}`
-		var e Event
-		if err := json.Unmarshal([]byte(golden), &e); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if e.Type != "message_update" {
-			t.Errorf("type = %q", e.Type)
-		}
-	})
+func TestAgentStartEventDecode(t *testing.T) {
+	var event Event
+	if err := json.Unmarshal([]byte(`{"type":"agent_start"}`), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventAgentStart {
+		t.Errorf("type = %q", event.Type)
+	}
+}
+
+func TestAgentEndEventDecode(t *testing.T) {
+	golden := `{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"boom","timestamp":1}],"willRetry":false}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventAgentEnd || event.WillRetry {
+		t.Errorf("agent_end fields wrong: %+v", event)
+	}
+	if len(event.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(event.Messages))
+	}
+	message := event.Messages[0]
+	if message.Role != "assistant" || message.StopReason != "error" || message.ErrorMessage != "boom" {
+		t.Errorf("message wrong: %+v", message)
+	}
+}
+
+func TestAgentSettledEventDecode(t *testing.T) {
+	var event Event
+	if err := json.Unmarshal([]byte(`{"type":"agent_settled"}`), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventAgentSettled {
+		t.Errorf("type = %q", event.Type)
+	}
+}
+
+func TestMessageEndEventDecode(t *testing.T) {
+	golden := `{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"Provider error","timestamp":1}}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventMessageEnd || event.Message == nil {
+		t.Fatalf("message_end wrong: %+v", event)
+	}
+	if event.Message.StopReason != "error" || event.Message.ErrorMessage != "Provider error" {
+		t.Errorf("message wrong: %+v", event.Message)
+	}
+}
+
+func TestCompactionStartEventDecode(t *testing.T) {
+	var event Event
+	if err := json.Unmarshal([]byte(`{"type":"compaction_start","reason":"threshold"}`), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventCompactionStart || event.Reason != "threshold" {
+		t.Errorf("compaction_start wrong: %+v", event)
+	}
+}
+
+func TestCompactionEndEventDecode(t *testing.T) {
+	golden := `{"type":"compaction_end","reason":"threshold","result":{"summary":"..."},"aborted":false,"willRetry":false}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventCompactionEnd || event.Reason != "threshold" || len(event.Result) == 0 {
+		t.Errorf("compaction_end wrong: %+v", event)
+	}
+}
+
+func TestQueueUpdateEventDecode(t *testing.T) {
+	golden := `{"type":"queue_update","steering":["one"],"followUp":["two","three"]}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(event.Steering) != 1 || event.Steering[0] != "one" {
+		t.Errorf("steering wrong: %v", event.Steering)
+	}
+	if len(event.FollowUp) != 2 || event.FollowUp[1] != "three" {
+		t.Errorf("followUp wrong: %v", event.FollowUp)
+	}
+}
+
+func TestAutoRetryStartEventDecode(t *testing.T) {
+	golden := `{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"529 overloaded"}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != EventAutoRetryStart || event.ErrorMessage != "529 overloaded" {
+		t.Errorf("auto_retry_start wrong: %+v", event)
+	}
+}
+
+func TestUnrelatedEventFieldsDropped(t *testing.T) {
+	// message_update carries usage and assistantMessageEvent; the component
+	// must not retain them.
+	golden := `{"type":"message_update","usage":{"input":100,"output":1,"totalTokens":101},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello "}}`
+	var event Event
+	if err := json.Unmarshal([]byte(golden), &event); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if event.Type != "message_update" {
+		t.Errorf("type = %q", event.Type)
+	}
 }
 
 func TestUIRequestDecode(t *testing.T) {
