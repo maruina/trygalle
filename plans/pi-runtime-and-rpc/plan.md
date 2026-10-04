@@ -20,6 +20,14 @@
 | `cli-best-practices` | `user-requested` | The REPL is a CLI surface | stdout for data, stderr for diagnostics, `--help` with full long flags, no secrets in argv, consistent exit codes; `--json` deliberately omitted for an interactive debug tool |
 | `write` | `skill-loader` | The plan is a prose artifact | Applied to this document |
 
+### Execution
+| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `resolve-worktree` | `prompt-required` | Plan path must map to its owning worktree | Resolved `plans/pi-runtime-and-rpc/plan.md` into `maruina-pi-runtime-and-rpc-design`; all commands run there |
+| `feature-worktree` | `prompt-required` | Writes and commits must stay out of `main` | Continued in the resolved plan worktree (branch `maruina/pi-runtime-and-rpc-design`) |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (Go files in Slice 1); no CLI, script, or Kubernetes triggers in this slice |
+| `go-best-practices` | `skill-loader` | Go files created or modified | External `rpc_test` package for the live round-trip; `go fix -diff` modernization before commit; `-race` on the concurrency-heavy client; no third-party dependencies |
+
 ---
 
 ## Implementation Contract
@@ -352,12 +360,14 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 **Traces to:** R1
 **Files:** `go.mod`, `internal/rpc/framing.go`, `internal/rpc/framing_test.go`
 
-- [ ] Create `go.mod` for module `github.com/maruina/trygalle` with `go 1.27`.
-- [ ] Implement the record scanner: read a byte stream, split records only on LF (`0x0a`), strip one optional preceding CR (`0x0d`), return each raw record line. No record-length limit.
-- [ ] Implement the record writer: marshal one JSON object, append LF, write with a full-write loop (short writes retried).
-- [ ] Unit-test: LF split; CR strip; `U+2028`/`U+2029` bytes inside a JSON string do not split; a 1 MiB record decodes; a non-JSON line returns a typed `ProtocolError` (define it here).
-- [ ] Run `go test ./internal/rpc/` and `go vet ./...`; expect all green.
-- [ ] Commit with `feat: add JSONL record framing for the pi rpc protocol`.
+- [x] Create `go.mod` for module `github.com/maruina/trygalle` with `go 1.27`.
+- [x] Implement the record scanner: read a byte stream, split records only on LF (`0x0a`), strip one optional preceding CR (`0x0d`), return each raw record line. No record-length limit.
+- [x] Implement the record writer: marshal one JSON object, append LF, write with a full-write loop (short writes retried).
+- [x] Unit-test: LF split; CR strip; `U+2028`/`U+2029` bytes inside a JSON string do not split; a 1 MiB record decodes; a non-JSON line returns a typed `ProtocolError` (define it here).
+- [x] Run `go test ./internal/rpc/` and `go vet ./...`; expect all green.
+- [x] Commit with `feat: add JSONL record framing for the pi rpc protocol`.
+
+  Verified: unit tests green, `go vet ./...` clean, gofmt clean. Committed as 64f4933.
 
 ### Task 2: Protocol record types
 **Delivers:** Decoding of every record family Trygalle consumes, pinned to the schemas in this plan.
@@ -365,26 +375,29 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 **Traces to:** R1, R2
 **Files:** `internal/rpc/records.go`, `internal/rpc/records_test.go`
 
-- [ ] Implement `Command` builders (send-side), `Response` envelope (success/error, `command`, `data`, optional `id`), `Event` (type plus the fields the coordinator consumes: `agent_start`, `agent_end{messages,willRetry}`, `agent_settled`, `turn_*`, `message_*`, compaction, retry, queue events), `UIRequest`/`UIResponse`, and the command-data structs from "Protocol Record Schemas".
-- [ ] Represent `get_last_assistant_text`'s `text` so JSON `null` is distinguishable from empty string (e.g. `*string`).
-- [ ] Unit-test each struct against a golden JSON literal copied from the schemas section, including the `parse` response without `id` and a `text: null` payload.
-- [ ] Run `go test ./internal/rpc/`; expect green.
-- [ ] Commit with `feat: add pi rpc protocol record types`.
+- **Status:** complete — verified green, committed as 8248c12.
+
+- [x] Implement `Command` builders (send-side), `Response` envelope (success/error, `command`, `data`, optional `id`), `Event` (type plus the fields the coordinator consumes: `agent_start`, `agent_end{messages,willRetry}`, `agent_settled`, `turn_*`, `message_*`, compaction, retry, queue events), `UIRequest`/`UIResponse`, and the command-data structs from "Protocol Record Schemas".
+- [x] Represent `get_last_assistant_text`'s `text` so JSON `null` is distinguishable from empty string (e.g. `*string`).
+- [x] Unit-test each struct against a golden JSON literal copied from the schemas section, including the `parse` response without `id` and a `text: null` payload.
+- [x] Run `go test ./internal/rpc/`; expect green.
+- [x] Commit with `feat: add pi rpc protocol record types`.
 
 ### Task 3: RPC client
+- **Status:** complete — `go test -race` green, committed as acda453.
 **Delivers:** The client that starts Pi, correlates by ID, subscribes before send, enforces deadlines, answers extension UI, and closes stdin.
 **Blocked by:** Task 2
 **Traces to:** R2, R16
 **Files:** `internal/rpc/client.go`, `internal/rpc/client_test.go`
 
-- [ ] Implement `Client`: start the process (`exec.Command`); a read goroutine that always drains stdout, decodes records, routes responses by ID to waiting `Send` calls, and delivers events and UI requests on buffered channels (event buffer 1024; a full channel is a `ProtocolError`, never a drop); connect stderr to a separate diagnostic writer (default `os.Stderr`), never the protocol parser. Own one `cmd.Wait()` goroutine; make process exit fail pending sends and publish one cached terminal result to every `Wait` caller.
-- [ ] Establish the events/UI subscriptions at construction, before any `Send` can run.
-- [ ] Implement `Send` with a per-call `context.Context` deadline and unique incrementing IDs. Implement `AnswerUIDialog` (`extension_ui_response` with `cancelled: true`), `CloseStdin`, and idempotent `Kill` for a child that misses its bounded graceful-exit deadline.
-- [ ] Route a `parse` response (no ID) to a log record, not an error.
-- [ ] Unit-test with in-memory scripted streams (no process): correlation, fast-completion-before-send (R2 scenario), deadline expiry, garbage line → `ProtocolError`, `parse` response → logged, and extension-UI answer written to stdin.
-- [ ] Use a helper process to test graceful stdin close, forced `Kill`, repeated `Wait` callers receiving the same exit result, pending sends failing on process exit, and stderr remaining separate from stdout protocol records.
-- [ ] Run `go test ./internal/rpc/ -race`; expect green.
-- [ ] Commit with `feat: add pi rpc client with id correlation and event subscription`.
+- [x] Implement `Client`: start the process (`exec.Command`); a read goroutine that always drains stdout, decodes records, routes responses by ID to waiting `Send` calls, and delivers events and UI requests on buffered channels (event buffer 1024; a full channel is a `ProtocolError`, never a drop); connect stderr to a separate diagnostic writer (default `os.Stderr`), never the protocol parser. Own one `cmd.Wait()` goroutine; make process exit fail pending sends and publish one cached terminal result to every `Wait` caller.
+- [x] Establish the events/UI subscriptions at construction, before any `Send` can run.
+- [x] Implement `Send` with a per-call `context.Context` deadline and unique incrementing IDs. Implement `AnswerUIDialog` (`extension_ui_response` with `cancelled: true`), `CloseStdin`, and idempotent `Kill` for a child that misses its bounded graceful-exit deadline.
+- [x] Route a `parse` response (no ID) to a log record, not an error.
+- [x] Unit-test with in-memory scripted streams (no process): correlation, fast-completion-before-send (R2 scenario), deadline expiry, garbage line → `ProtocolError`, `parse` response → logged, and extension-UI answer written to stdin.
+- [x] Use a helper process to test graceful stdin close, forced `Kill`, repeated `Wait` callers receiving the same exit result, pending sends failing on process exit, and stderr remaining separate from stdout protocol records.
+- [x] Run `go test ./internal/rpc/ -race`; expect green.
+- [x] Commit with `feat: add pi rpc client with id correlation and event subscription`.
 
 ### Task 4: Live-test gate and first live round-trip
 **Delivers:** The version-checked `internal/harness` gate and the live `get_state`/`get_commands` protocol proof.
@@ -392,12 +405,12 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 **Traces to:** R2, R15 (validation command subset)
 **Files:** `internal/harness/harness.go`, `internal/harness/harness_test.go`, `internal/rpc/live_test.go`
 
-- [ ] Implement the gate: `TRYGALLE_PI_TESTS=off` skips before binary lookup. Otherwise, `harness.Pi(t)` resolves `TRYGALLE_PI_BIN` (default `pi` from `PATH`), runs the binary's `--version`, and requires exactly Pi 1.0.1. `auto` skips with instructions only when the binary is unavailable; a version mismatch fails. `on` fails when the binary is unavailable or mismatched.
-- [ ] Implement `harness.Start`: temp `PI_CODING_AGENT_DIR` (empty synthetic agent dir), temp `--session-dir` under `t.TempDir()`, `PI_SKIP_VERSION_CHECK=1`, and `PI_OFFLINE=1` (drop `PI_OFFLINE` if it blocks mock model calls in Task 5), start args `["--mode","rpc","--session-dir",dir]`, return a started `*rpc.Client` plus cleanup.
-- [ ] Live-test (in `package rpc_test`): send `get_state`; expect `success: true` and a non-empty `sessionId`; send `get_commands`; expect a non-empty command list.
-- [ ] Unit-test the gate with a fake binary that reports 1.0.1 and another version; test missing binary behavior for `auto` and `on`, and unconditional skip for `off`.
-- [ ] Run `go test ./internal/rpc/ -run Live`; with Pi 1.0.1 on PATH expect green, a different version must fail, and `TRYGALLE_PI_TESTS=off` must skip.
-- [ ] Commit with `test: add live-test gate and get_state round-trip`.
+- [x] Implement the gate: `TRYGALLE_PI_TESTS=off` skips before binary lookup. Otherwise, `harness.Pi(t)` resolves `TRYGALLE_PI_BIN` (default `pi` from `PATH`), runs the binary's `--version`, and requires exactly Pi 1.0.1. `auto` skips with instructions only when the binary is unavailable; a version mismatch fails. `on` fails when the binary is unavailable or mismatched.
+- [x] Implement `harness.Start`: temp `PI_CODING_AGENT_DIR` (empty synthetic agent dir), temp `--session-dir` under `t.TempDir()`, `PI_SKIP_VERSION_CHECK=1`, and `PI_OFFLINE=1` (drop `PI_OFFLINE` if it blocks mock model calls in Task 5), start args `["--mode","rpc","--session-dir",dir]`, return a started `*rpc.Client` plus cleanup.
+- [x] Live-test (in `package rpc_test`): send `get_state`; expect `success: true` and a non-empty `sessionId`; send `get_commands`; expect a non-empty command list.
+- [x] Unit-test the gate with a fake binary that reports 1.0.1 and another version; test missing binary behavior for `auto` and `on`, and unconditional skip for `off`.
+- [x] Run `go test ./internal/rpc/ -run Live`; with Pi 1.0.1 on PATH expect green, a different version must fail, and `TRYGALLE_PI_TESTS=off` must skip.
+- [x] Commit with `test: add live-test gate and get_state round-trip`.
 
 ### Slice 2: Hermetic live-Pi harness
 Delivers the mock model server and test extension that make every later live contract test hermetic.
