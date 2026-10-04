@@ -405,11 +405,11 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 **Traces to:** R2, R15 (validation command subset)
 **Files:** `internal/harness/harness.go`, `internal/harness/harness_test.go`, `internal/rpc/live_test.go`
 
-- [x] Implement the gate: `TRYGALLE_PI_TESTS=off` skips before binary lookup. Otherwise, `harness.Pi(t)` resolves `TRYGALLE_PI_BIN` (default `pi` from `PATH`), runs the binary's `--version`, and requires exactly Pi 1.0.1. `auto` skips with instructions only when the binary is unavailable; a version mismatch fails. `on` fails when the binary is unavailable or mismatched.
+- [x] Implement the gate: `TRYGALLE_PI_TESTS=off` skips before binary lookup. Otherwise, `harness.Pi(t)` resolves `TRYGALLE_PI_BIN` (default `pi` from `PATH`), runs the binary's `--version`, and requires exactly Pi 1.0.1. `auto` (local default) skips with instructions when the binary is missing or reports another version. `on` (CI) fails when the binary is missing or mismatched. A binary that exists but cannot report its version fails in every mode.
 - [x] Implement `harness.Start`: temp `PI_CODING_AGENT_DIR` (empty synthetic agent dir), temp `--session-dir` under `t.TempDir()`, `PI_SKIP_VERSION_CHECK=1`, and `PI_OFFLINE=1` (drop `PI_OFFLINE` if it blocks mock model calls in Task 5), start args `["--mode","rpc","--session-dir",dir]`, return a started `*rpc.Client` plus cleanup.
 - [x] Live-test (in `package rpc_test`): send `get_state`; expect `success: true` and a non-empty `sessionId`; send `get_commands`; expect a non-empty command list.
 - [x] Unit-test the gate with a fake binary that reports 1.0.1 and another version; test missing binary behavior for `auto` and `on`, and unconditional skip for `off`.
-- [x] Run `go test ./internal/rpc/ -run Live`; with Pi 1.0.1 on PATH expect green, a different version must fail, and `TRYGALLE_PI_TESTS=off` must skip.
+- [x] Run `go test ./internal/rpc/ -run Live`; with Pi 1.0.1 on PATH expect green; a different version must skip in `auto` and fail with `TRYGALLE_PI_TESTS=on`; `TRYGALLE_PI_TESTS=off` must skip.
 - [x] Commit with `test: add live-test gate and get_state round-trip`.
 
 ### Slice 2: Hermetic live-Pi harness

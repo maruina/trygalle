@@ -4,7 +4,10 @@
 package harness
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,23 +28,28 @@ const (
 
 // TRYGALLE_PI_TESTS mode values.
 const (
-	ModeAuto = "auto" // default: run with Pi 1.0.1 available; skip with instructions otherwise
-	ModeOn   = "on"   // fail when unavailable or the version differs from the pin
+	ModeAuto = "auto" // default (local): run with Pi 1.0.1; skip with instructions when pi is missing or another version
+	ModeOn   = "on"   // CI: fail when pi is missing or the version differs from the pin
 	ModeOff  = "off"  // always skip, before any binary lookup
 )
 
+// versionTimeout bounds `pi --version` so a hung binary cannot hang the suite.
+const versionTimeout = 10 * time.Second
+
 // resolveResult carries the gate decision as pure data so the unit tests can
-// exercise every branch without test-control flow tricks.
+// exercise every branch without test-control flow tricks. A non-empty
+// skipReason means the live test must skip.
 type resolveResult struct {
-	mode        string
-	bin         string
-	version     string
-	unavailable bool
+	mode       string
+	bin        string
+	version    string
+	skipReason string
 }
 
 // resolveGate reads the test configuration and the pinned pi binary. It returns
-// an error only for conditions that must fail the test: `on` with an
-// unavailable binary, any mode with a version mismatch, or an unknown mode.
+// an error only for conditions that must fail the test: `on` with a missing
+// binary or a version mismatch, a binary that exists but cannot report its
+// version, or an unknown mode.
 func resolveGate() (resolveResult, error) {
 	mode := os.Getenv(envTests)
 	if mode == "" {
@@ -49,7 +57,7 @@ func resolveGate() (resolveResult, error) {
 	}
 	switch mode {
 	case ModeOff:
-		return resolveResult{mode: mode}, nil
+		return resolveResult{mode: mode, skipReason: "live tests disabled (TRYGALLE_PI_TESTS=off)"}, nil
 	case ModeOn, ModeAuto:
 	default:
 		return resolveResult{}, fmt.Errorf("invalid TRYGALLE_PI_TESTS %q (want %s, %s, or %s)", mode, ModeAuto, ModeOn, ModeOff)
@@ -58,38 +66,42 @@ func resolveGate() (resolveResult, error) {
 	if bin == "" {
 		bin = "pi"
 	}
-	out, runErr := exec.Command(bin, "--version").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
+	defer cancel()
+	out, runErr := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
 	version := strings.TrimSpace(string(out))
 	if runErr != nil {
+		if !errors.Is(runErr, exec.ErrNotFound) && !errors.Is(runErr, fs.ErrNotExist) {
+			return resolveResult{}, fmt.Errorf("pi binary %q failed to report its version: %v", bin, runErr)
+		}
 		if mode == ModeOn {
 			return resolveResult{}, fmt.Errorf("pi binary %q unavailable (TRYGALLE_PI_TESTS=%s): %v", bin, mode, runErr)
 		}
-		return resolveResult{mode: mode, unavailable: true}, nil
+		return resolveResult{mode: mode, skipReason: fmt.Sprintf(
+			"live tests need the pinned pi %s binary on PATH or TRYGALLE_PI_BIN", PinnedPiVersion)}, nil
 	}
 	if version != PinnedPiVersion {
-		return resolveResult{}, fmt.Errorf("pi version %q does not match the pinned version %s", version, PinnedPiVersion)
+		if mode == ModeOn {
+			return resolveResult{}, fmt.Errorf("pi version %q does not match the pinned version %s", version, PinnedPiVersion)
+		}
+		return resolveResult{mode: mode, version: version, skipReason: fmt.Sprintf(
+			"live tests need pi %s; %q reports %q (TRYGALLE_PI_TESTS=on fails instead)", PinnedPiVersion, bin, version)}, nil
 	}
 	return resolveResult{mode: mode, bin: bin, version: version}, nil
 }
 
 // Pi resolves the pinned pi binary per the TRYGALLE_PI_TESTS gate: it returns
-// the binary path to use, skips the test with instructions when the binary is
-// unavailable in auto mode, and fails the test for `on` and version mismatches.
+// the binary path to use, skips the test with instructions in auto mode when
+// the pinned version is not available, and fails the test for the errors
+// resolveGate reports.
 func Pi(t *testing.T) string {
 	t.Helper()
 	res, err := resolveGate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	switch res.mode {
-	case ModeOff:
-		t.Skip("live tests disabled (TRYGALLE_PI_TESTS=off)")
-	case ModeAuto:
-		if res.unavailable {
-			t.Skipf("live tests need the pinned pi %s binary on PATH or TRYGALLE_PI_BIN", PinnedPiVersion)
-		}
-	case ModeOn:
-		// unavailable already failed in resolveGate.
+	if res.skipReason != "" {
+		t.Skip(res.skipReason)
 	}
 	return res.bin
 }
