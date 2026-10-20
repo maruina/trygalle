@@ -82,8 +82,8 @@ func TestRunReturnsHandlerError(t *testing.T) {
 func TestCommandHelpExitsCleanly(t *testing.T) {
 	var stdout, stderr strings.Builder
 	err := command([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
-	if !errors.Is(err, errUsage) {
-		t.Fatalf("command(--help) error = %v, want errUsage", err)
+	if err != nil {
+		t.Fatalf("command(--help) error = %v, want a clean exit", err)
 	}
 	if !strings.Contains(stdout.String(), "--session-dir") || !strings.Contains(stdout.String(), "Example:") {
 		t.Errorf("usage missing on stdout:\n%s", stdout.String())
@@ -101,6 +101,20 @@ func TestCommandRequiresSessionDir(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--session-dir is required") {
 		t.Errorf("missing required-flag diagnostic on stderr: %q", stderr.String())
+	}
+}
+
+func TestCommandRejectsNonPositiveHeartbeat(t *testing.T) {
+	for _, value := range []string{"0", "-1s"} {
+		var stdout, stderr strings.Builder
+		argv := []string{"--session-dir", "/tmp/s", "--heartbeat-interval", value}
+		err := command(argv, strings.NewReader(""), &stdout, &stderr)
+		if !errors.Is(err, errUsage) {
+			t.Fatalf("--heartbeat-interval %s error = %v, want errUsage", value, err)
+		}
+		if !strings.Contains(stderr.String(), "--heartbeat-interval must be greater than zero") {
+			t.Errorf("--heartbeat-interval %s missing diagnostic: %q", value, stderr.String())
+		}
 	}
 }
 

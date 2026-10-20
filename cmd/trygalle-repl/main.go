@@ -47,7 +47,7 @@ Flags:
   --no-continue               start pi without --continue (fresh session)
   --heartbeat-interval dur    heartbeat notice interval while a run is active
                               (default 5m0s)
-  --shutdown-timeout dur      graceful shutdown deadline (default 30s0s)
+  --shutdown-timeout dur      graceful shutdown deadline (default 30s)
   -h, --help                  show this help
 
 Example:
@@ -83,6 +83,9 @@ func command(argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	heartbeat := fs.Duration("heartbeat-interval", 5*time.Minute, "heartbeat notice interval while a run is active")
 	shutdown := fs.Duration("shutdown-timeout", 30*time.Second, "graceful shutdown deadline")
 	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return errUsage
 	}
 	if fs.NArg() > 0 {
@@ -92,6 +95,13 @@ func command(argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	if *sessionDir == "" {
 		fmt.Fprintln(stderr, "trygalle-repl: --session-dir is required")
+		fs.Usage()
+		return errUsage
+	}
+	if *heartbeat <= 0 {
+		// runtime.Config.HeartbeatInterval must be positive: it feeds
+		// time.NewTicker, which panics on a non-positive duration.
+		fmt.Fprintln(stderr, "trygalle-repl: --heartbeat-interval must be greater than zero")
 		fs.Usage()
 		return errUsage
 	}
@@ -204,6 +214,8 @@ func renderNotice(n runtime.Notice) string {
 		text = "queued the message into the active run"
 	case runtime.NoticeEmptyResponse:
 		text = "pi returned no text"
+	case runtime.NoticeExtensionHandled:
+		text = "extension command handled; the active run continues"
 	case runtime.NoticeFailedRun:
 		text = "run failed: " + n.Text
 	case runtime.NoticeRoutingFailure:
