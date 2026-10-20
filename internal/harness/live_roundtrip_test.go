@@ -132,7 +132,7 @@ func firstAgentEnd(events []rpc.Event) (rpc.Event, bool) {
 	return rpc.Event{}, false
 }
 
-// TestLiveEmptyText pins the no-text representation. Observed against Pi 1.0.1:
+// TestLiveEmptyText pins the no-text representation. Observed against Pi 1.3.0:
 // an assistant message with empty content yields get_last_assistant_text data
 // `{}`, i.e. no text field (decodes to nil). The coordinator treats nil and ""
 // identically; the EmptyResponse notice unit test lands with the runtime
