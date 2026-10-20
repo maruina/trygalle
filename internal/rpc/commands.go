@@ -5,6 +5,21 @@ import (
 	"fmt"
 )
 
+// CommandError reports a command Pi answered with success=false. For prompt,
+// Pi sends an error response only when it did not accept the prompt (the
+// success response comes from its preflight callback), so a bounded retry of a
+// CommandError cannot duplicate a delivered prompt. Transport failures,
+// context cancellation, and process death are not CommandErrors: the command
+// may already have reached Pi.
+type CommandError struct {
+	Command string
+	Message string
+}
+
+func (e *CommandError) Error() string {
+	return fmt.Sprintf("pi %s command failed: %s", e.Command, e.Message)
+}
+
 // Prompt sends a prompt command with streamingBehavior "steer" and returns the
 // disposition Pi reports. prompt{steer} is the only submission form Trygalle
 // routes with: Pi decides between started, queued, and handled (see the
@@ -97,7 +112,7 @@ func (c *Client) sendOK(ctx context.Context, cmd Command) (Response, error) {
 		return Response{}, err
 	}
 	if !resp.Success {
-		return Response{}, fmt.Errorf("pi %s command failed: %s", cmd.Type, resp.Error)
+		return Response{}, &CommandError{Command: cmd.Type, Message: resp.Error}
 	}
 	return resp, nil
 }

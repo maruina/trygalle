@@ -14,7 +14,7 @@ type Config struct {
 	SessionDir string
 
 	StartupValidationTimeout time.Duration // default 60s
-	HeartbeatInterval        time.Duration // default 5m
+	HeartbeatInterval        time.Duration // default 5m; must be positive (feeds time.NewTicker)
 	ShutdownTimeout          time.Duration // default 30s; finalized by the Kubernetes design
 }
 

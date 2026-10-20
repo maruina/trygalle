@@ -51,7 +51,7 @@ Verified against documentation and, where noted, the installed implementation:
 - `agent_end` closes one low-level run and may be followed by retries, compaction recovery, steering, or follow-ups. `agent_settled` means Pi has no remaining automatic work.
 - `abort` aborts the current operation and responds after the session is idle. `abort` continues queued steering messages when they remain in the session; interactive Esc behavior is `clear_queue` before `abort`.
 - `clear_queue` removes queued steering and follow-up messages and returns their text.
-- `new_session` starts a fresh session and can be canceled by a `session_before_switch` extension event handler, returning `{"cancelled": true}`.
+- `new_session` starts a fresh session and can be canceled by a `session_before_switch` extension event handler that returns `{"cancel": true}` (implementation-verified in the Pi 1.3.0 bundle, which maps that result to `{"cancelled": true}` in the `new_session` response).
 - `get_last_assistant_text` returns the last assistant text in the session, or `null` if none exists.
 - Session loading skips malformed JSONL lines; session discovery is best-effort and excludes unreadable files without failing other sessions (implementation-verified in `session-manager.js`).
 - `--continue` resumes the most recent session for the current working directory. `--session-dir` selects the session directory.
@@ -100,7 +100,7 @@ One rule, no coordinator-state branching:
 
 `/abort` mirrors TUI Esc exactly: `clear_queue` before `abort`, because `abort` alone continues queued steering messages. The returned dropped texts are reported to the user rather than restored to an editor, because Telegram already holds them in the user's own history. The command stays named `/abort` (intent, not a TUI key); the design documents the Esc equivalence.
 
-`/new` mirrors the TUI's immediate execution: the active operation is superseded, not rejected. `clear_queue` runs first so no steering messages survive the switch. A `session_before_switch` extension handler may cancel the switch (`{"cancelled": true}`); Trygalle reports the cancellation and keeps the current session.
+`/new` mirrors the TUI's immediate execution: the active operation is superseded, not rejected. `clear_queue` runs first so no steering messages survive the switch. A `session_before_switch` extension handler may cancel the switch by returning `{"cancel": true}` (reported as `{"cancelled": true}` in the `new_session` response); Trygalle reports the cancellation and keeps the current session.
 
 ### Operation state machine
 An operation is the run started by a user message plus everything steered into it. One coordinator event loop is the sole consumer of Pi events and UI requests and owns operation state. It also observes process exit. `HandleUserInput` routes a command and returns after its RPC response; it does not wait for `agent_settled`, so the REPL can accept more input while a run is active. Concurrent state changes are serialized by the coordinator, while Pi remains the authority on queueing and run state.

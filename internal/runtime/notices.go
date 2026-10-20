@@ -11,10 +11,13 @@ import (
 // Telegram design; this layer carries structured data only.
 type NoticeKind string
 
-// The ten notice kinds of the pinned notifier seam.
+// The notice kinds of the pinned notifier seam. ExtensionHandled extends the
+// original ten with the outcome of an extension command that consumed a
+// mid-run input (see the coordinator handled-mid-run branch).
 const (
 	NoticeStatus              NoticeKind = "Status"
 	NoticeSteerAcknowledged   NoticeKind = "SteerAcknowledged"
+	NoticeExtensionHandled    NoticeKind = "ExtensionHandled"
 	NoticeEmptyResponse       NoticeKind = "EmptyResponse"
 	NoticeFailedRun           NoticeKind = "FailedRun"
 	NoticeAbortReport         NoticeKind = "AbortReport"
