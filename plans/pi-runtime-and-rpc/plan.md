@@ -24,9 +24,10 @@
 | Skill | Source | Why loaded | How used |
 |---|---|---|---|
 | `resolve-worktree` | `prompt-required` | Plan path must map to its owning worktree | Resolved `plans/pi-runtime-and-rpc/plan.md` into `maruina-pi-runtime-and-rpc-design`; all commands run there |
-| `feature-worktree` | `prompt-required` | Writes and commits must stay out of `main` | Continued in the resolved plan worktree (branch `maruina/pi-runtime-and-rpc-design`) |
-| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (Go files in Slice 1); no CLI, script, or Kubernetes triggers in this slice |
-| `go-best-practices` | `skill-loader` | Go files created or modified | External `rpc_test` package for the live round-trip; `go fix -diff` modernization before commit; `-race` on the concurrency-heavy client; no third-party dependencies |
+| `feature-worktree` | `prompt-required` | Writes and commits must stay out of `main` | Continued in the resolved plan worktree (branch `maruina/pi-runtime-and-rpc-design`); fast-forwarded the worktree to the merged post-review origin state before Slice 2 |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (Go files in Slices 1 and 2); no CLI, script, or Kubernetes triggers in these slices |
+| `go-best-practices` | `skill-loader` | Go files created or modified | Slice 2: internal `harness` package tests for the scripted mock server and models.json (exercises unexported helpers); live wire-shape self-test against real Pi; `httptest` over real network; preserves event buffer contract; no third-party dependencies |
+| `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to Slice 2 task status notes |
 
 ---
 
@@ -416,18 +417,22 @@ Delivers the live `get_state`/`get_commands` round-trip against the real install
 ### Slice 2: Hermetic live-Pi harness
 Delivers the mock model server and test extension that make every later live contract test hermetic.
 
+**Slice 2 status:** complete — Tasks 5–7 shipped (commits 59388d3, 0b3aaa0, 29cb6c6, plus `refactor: apply go fix modernization to slice 2 harness tests`). Verified: `go test -race ./internal/harness/` green, `go vet ./...` clean, `go fix -diff ./...` clean, gofmt clean, syntax hygiene grep clean.
+
 ### Task 5: Mock model server and generated models.json
 **Delivers:** An `httptest` `openai-completions` server that real Pi accepts, registered through generated `models.json`, with scripted behaviors.
 **Blocked by:** Task 4
 **Traces to:** R3, R4, R9
 **Files:** `internal/harness/mockmodel.go`, `internal/harness/harness.go` (extend), `internal/harness/mockmodel_test.go`
 
-- [ ] Implement the server on an `httptest.Listener`: `POST {base}/chat/completions`. Scripted behaviors: `RespondText(s)`, `RespondEmptyText`, `FailOnce` (HTTP 500 then text), `FailAlways`, `Delay(d)` (holds the run open).
-- [ ] Generate `models.json` in the temp agent dir: provider `mock`, `api: "openai-completions"`, `apiKey: "mock"`, `baseUrl` = mock server URL, one model `mock-model`. If Pi 1.0.1 rejects an unknown provider id, switch the key to `ollama` with the same `baseUrl` and note it in a `deliberate:` comment.
-- [ ] Harness start args gain `--provider mock --model mock-model` (or the working equivalent; pin the verified form in the harness).
-- [ ] Live self-test: start Pi through the harness in request-capture mode, send one synthetic prompt, capture the request in memory, and assert its path, selected headers, body schema, and `stream` flag. Test logs may include the path, selected header names, body field names, and `stream` value, but must redact prompt content and credentials. Implement the response side against the observed shape (SSE chunks when `stream: true`, plain JSON otherwise) and assert one scripted round-trip completes.
-- [ ] Run `go test ./internal/harness/`; expect green.
-- [ ] Commit with `test: add openai-completions mock model server and generated models.json`.
+- **Status:** complete — Slice 2 execution. Empirically pinned against Pi 1.0.1 before coding: `mock` provider key works (no `ollama` fallback needed); request path is `{baseUrl}/chat/completions` where `models.json` baseUrl is `<mock URL>/v1`; body is `{messages, model, stream: true, stream_options, max_completion_tokens, store: false, tools}`, header `Authorization: Bearer mock`; Pi always streams SSE; default auto-retry is on (500 → `agent_end` `willRetry: true` → retry); retries exhausted → last `agent_end` assistant message `stopReason: "error"` + `errorMessage` then `auto_retry_end` + `agent_settled`; empty text run → `get_last_assistant_text` data `{}` (text null/absent).
+
+- [x] Implement the server on an `httptest.Listener`: `POST {base}/chat/completions`. Scripted behaviors: `RespondText(s)`, `RespondEmptyText`, `FailOnce` (HTTP 500 then text), `FailAlways`, `Delay(d)` (holds the run open).
+- [x] Generate `models.json` in the temp agent dir: provider `mock`, `api: "openai-completions"`, `apiKey: "mock"`, `baseUrl` = mock server URL, one model `mock-model`. If Pi 1.0.1 rejects an unknown provider id, switch the key to `ollama` with the same `baseUrl` and note it in a `deliberate:` comment. Verified live: `mock` is accepted; no `ollama` fallback and no `deliberate:` comment needed.
+- [x] Harness start args gain `--provider mock --model mock-model` (or the working equivalent; pin the verified form in the harness).
+- [x] Live self-test: start Pi through the harness in request-capture mode, send one synthetic prompt, capture the request in memory, and assert its path, selected headers, body schema, and `stream` flag. Test logs may include the path, selected header names, body field names, and `stream` value, but must redact prompt content and credentials. Implement the response side against the observed shape (SSE chunks when `stream: true`, plain JSON otherwise) and assert one scripted round-trip completes.
+- [x] Run `go test ./internal/harness/`; expect green. Verified green incl. live `TestMockModelLiveWireShape`; `go vet ./...` clean.
+- [x] Commit with `test: add openai-completions mock model server and generated models.json`.
 
 ### Task 6: Live prompt round-trip, retries, and edge responses
 **Delivers:** A live Pi completing a full prompt cycle through the mock model — hermetic, no credentials.
@@ -435,12 +440,13 @@ Delivers the mock model server and test extension that make every later live con
 **Traces to:** R3, R4, R5 (idle disposition), R7, R9
 **Files:** `internal/harness/live_roundtrip_test.go`
 
-- [ ] Live-test: send `prompt{steer}`; expect disposition `"started"`; consume events until `agent_settled`; call `get_last_assistant_text`; expect the scripted text.
-- [ ] Live-test retry semantics: `FailOnce`; expect `agent_end` with `willRetry: true`, then the retry, then `agent_settled`; assert completion detection keys only on `agent_settled`.
-- [ ] Live-test empty text: `RespondEmptyText`; record whether `get_last_assistant_text` returns `null` or an empty string. The coordinator treats either representation as no text; unit-test both payloads and assert an `EmptyResponse` notice.
-- [ ] Live-test failed run: `FailAlways`; expect the run to settle with an assistant message carrying `stopReason: "error"` and an `errorMessage` in the event stream.
-- [ ] Run `go test ./internal/harness/`; expect green.
-- [ ] Commit with `test: pin live prompt round-trip and edge responses`.
+- **Status:** complete. Coverage note: Pi 1.0.1 normalizes the empty-text run to `data: {}` (no text field, decodes to nil); the `EmptyResponse` notice assertion for "" and null payloads lands in the runtime slice (Task 9), not here.
+- [x] Live-test: send `prompt{steer}`; expect disposition `"started"`; consume events until `agent_settled`; call `get_last_assistant_text`; expect the scripted text.
+- [x] Live-test retry semantics: `FailOnce`; expect `agent_end` with `willRetry: true`, then the retry, then `agent_settled`; assert completion detection keys only on `agent_settled`. Verified: Pi 1.0.1 auto-retries the provider 500; the first `agent_end` carries `willRetry: true`.
+- [x] Live-test empty text: `RespondEmptyText`; record whether `get_last_assistant_text` returns `null` or an empty string. The coordinator treats either representation as no text; unit-test both payloads and assert an `EmptyResponse` notice. Recorded: observed `null` (`data: {}`) for an empty-content assistant message.
+- [x] Live-test failed run: `FailAlways`; expect the run to settle with an assistant message carrying `stopReason: "error"` and an `errorMessage` in the event stream. Verified: default auto-retry exhausts (4 runs), the terminal `agent_end` assistant message carries `stopReason: "error"` and `errorMessage`; test runs ~15s due to retry backoff.
+- [x] Run `go test ./internal/harness/`; expect green. Verified green incl. all four `-run TestLive` cases.
+- [x] Commit with `test: pin live prompt round-trip and edge responses`.
 
 ### Task 7: Test extension fixture
 **Delivers:** A synthetic public-safe Pi extension providing the interaction surfaces later tests need.
@@ -448,11 +454,12 @@ Delivers the mock model server and test extension that make every later live con
 **Traces to:** R5 (handled), R13, R14
 **Files:** `internal/harness/testdata/agent/extension.js`, `internal/harness/extension_test.go`
 
-- [ ] Write the extension (consult Pi's `extensions.md` for the exact factory API): register `/mock-dialog` (opens `ctx.ui.select` with a long timeout), `/mock-notify` (calls `ctx.ui.notify`, starts no run), `/mock-run` (starts its own run via `pi.sendMessage`), and a `session_before_switch` handler that cancels only when the process env `MOCK_CANCEL_NEW_SESSION=1`.
-- [ ] Wire the harness to copy the extension into the temp agent dir.
-- [ ] Live-test: `get_commands` lists the three commands; sending `/mock-notify` via `prompt` yields disposition `"handled"` with no preceding `agent_start`; sending `/mock-run` (which directly calls `pi.sendMessage(..., { triggerTurn: true })` inside its handler) yields `agent_start` before the `"handled"` response, then `agent_settled`.
-- [ ] Run `go test ./internal/harness/`; expect green.
-- [ ] Commit with `test: add synthetic pi extension fixture`.
+- **Status:** complete. Verified live: R8 ordering holds — after pre-draining the event channel, `/mock-run`'s first post-send event is `agent_start` (the client's single read goroutine dispatches in wire order, so this proves Pi emitted it before the `"handled"` response).
+- [x] Write the extension (consult Pi's `extensions.md` for the exact factory API): register `/mock-dialog` (opens `ctx.ui.select` with a long timeout), `/mock-notify` (calls `ctx.ui.notify`, starts no run), `/mock-run` (starts its own run via `pi.sendMessage`), and a `session_before_switch` handler that cancels only when the process env `MOCK_CANCEL_NEW_SESSION=1`. Factory API pinned from Pi 1.0.1 `extensions.md` and `types.d.ts`: `ctx.ui.select(title, options, {timeout})`, `ctx.ui.notify(message, type)`, `pi.sendMessage(message, {triggerTurn})` on `ExtensionAPI`, `session_before_switch` result `{cancel: true}`.
+- [x] Wire the harness to copy the extension into the temp agent dir (`harness.WithExtension` + `installExtension`).
+- [x] Live-test: `get_commands` lists the three commands; sending `/mock-notify` via `prompt` yields disposition `"handled"` with no preceding `agent_start`; sending `/mock-run` (which directly calls `pi.sendMessage(..., { triggerTurn: true })` inside its handler) yields `agent_start` before the `"handled"` response, then `agent_settled`.
+- [x] Run `go test ./internal/harness/`; expect green. Verified green; `go test ./...` and gofmt clean.
+- [x] Commit with `test: add synthetic pi extension fixture`.
 
 ### Slice 3: Runtime core — routing, operation state machine, heartbeat, minimal REPL
 Delivers the coordinator that routes every message and produces a visible outcome for every terminal state, plus the prompt-only REPL.

@@ -5,11 +5,13 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,19 +140,97 @@ func Pi(t *testing.T) string {
 	return res.bin
 }
 
+// Option configures a harness.Start call.
+type Option func(*options)
+
+type options struct {
+	args          []string
+	model         *MockModel
+	extensionPath string
+}
+
+// WithArgs replaces the default pi startup arguments.
+func WithArgs(args ...string) Option { return func(o *options) { o.args = args } }
+
+// WithModel adds the generated models.json with the mock provider pointing at
+// m and appends --provider mock --model mock-model to the startup arguments.
+func WithModel(m *MockModel) Option { return func(o *options) { o.model = m } }
+
+// WithExtension copies one pi extension source file into the hermetic agent
+// directory so Pi loads it at startup.
+func WithExtension(path string) Option { return func(o *options) { o.extensionPath = path } }
+
 // Start launches the given pinned pi binary in rpc mode under a hermetic
 // environment and returns the connected client. It registers a bounded stop on
 // test cleanup: close stdin, wait briefly, then kill.
-func Start(t *testing.T, bin string, args ...string) *rpc.Client {
+func Start(t *testing.T, bin string, opts ...Option) *rpc.Client {
 	t.Helper()
+	o := options{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	args := o.args
 	if len(args) == 0 {
 		args = []string{"--mode", "rpc", "--session-dir", t.TempDir()}
 	}
 	// These are process-wide; live tests never run in parallel.
-	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
 	t.Setenv("PI_SKIP_VERSION_CHECK", "1")
 	t.Setenv("PI_OFFLINE", "1")
+	if o.model != nil {
+		writeModelsJSON(t, agentDir, o.model.URL())
+		args = append(args, "--provider", mockProvider, "--model", mockModelID)
+	}
+	if o.extensionPath != "" {
+		installExtension(t, agentDir, o.extensionPath)
+	}
+	return start(t, bin, args)
+}
 
+// writeModelsJSON generates the hermetic models.json that registers the mock
+// provider against the mock model server. Pi requests {baseUrl}/chat/completions,
+// so the base URL carries the /v1 prefix.
+func writeModelsJSON(t *testing.T, agentDir, baseURL string) {
+	t.Helper()
+	models := map[string]any{
+		"providers": map[string]any{
+			mockProvider: map[string]any{
+				"baseUrl": baseURL + "/v1",
+				"api":     mockAPI,
+				"apiKey":  mockAPIKey,
+				"models":  []any{map[string]any{"id": mockModelID}},
+			},
+		},
+	}
+	b, err := json.MarshalIndent(models, "", "  ")
+	if err != nil {
+		t.Fatalf("encode models.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
+}
+
+// installExtension copies one pi extension source file into the hermetic agent
+// extension directory so Pi loads it at startup.
+func installExtension(t *testing.T, agentDir, path string) {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read extension %s: %v", path, err)
+	}
+	extDir := filepath.Join(agentDir, "extensions")
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		t.Fatalf("create extensions dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, filepath.Base(path)), src, 0o644); err != nil {
+		t.Fatalf("install extension: %v", err)
+	}
+}
+
+func start(t *testing.T, bin string, args []string) *rpc.Client {
+	t.Helper()
 	client, err := rpc.New(bin, args)
 	if err != nil {
 		t.Fatalf("start pi: %v", err)
