@@ -28,6 +28,9 @@
 | `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (Go files in Slices 1 and 2); no CLI, script, or Kubernetes triggers in these slices |
 | `go-best-practices` | `skill-loader` | Go files created or modified | Slice 2: internal `harness` package tests for the scripted mock server and models.json (exercises unexported helpers); live wire-shape self-test against real Pi; `httptest` over real network; preserves event buffer contract; no third-party dependencies |
 | `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to Slice 2 task status notes |
+| `feature-worktree` | `prompt-required` | Slice 3 writes and commits need a feature worktree | Created `maruina-runtime-core` (branch `maruina/runtime-core`) from `origin/main` after the slice 2 squash merge |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` for Slice 3 (new Go files); no Kubernetes triggers; `reviewable-pr-workflow` and `git-machete` load for the PR itself |
+| `go-best-practices` | `skill-loader` | Go files created or modified | External `runtime_test` package with a scripted fake client; one event loop as sole consumer of the client channels; `-race` on all runtime tests; `go fix` modernization (`new(expr)`) applied before commits |
 
 ---
 
@@ -464,17 +467,19 @@ Delivers the mock model server and test extension that make every later live con
 ### Slice 3: Runtime core — routing, operation state machine, heartbeat, minimal REPL
 Delivers the coordinator that routes every message and produces a visible outcome for every terminal state, plus the prompt-only REPL.
 
+**Slice 3 status:** complete — Tasks 8–12 shipped (commits 70895ad, 0f4a3ae, 048c8c1, 59b53bf, 77d2047). Also bumps the pinned pi to 1.3.0 (commit 7288162); the full live contract suite re-verified green against pi 1.3.0. Verified: `go test -race ./...` green, `go vet ./...`, `go fix -diff ./...`, gofmt clean, and a scripted REPL smoke check against real pi 1.3.0 with a real model.
+
 ### Task 8: Config, notices, and the client seam
 **Delivers:** `internal/runtime` foundations: `Config` with defaults and degraded-args filtering, `Notifier`/`Notice`, and the `PiClient` seam.
 **Blocked by:** Task 3 (types only; no live need)
 **Traces to:** R7 (notice vocabulary), Implementation Contract constants
 **Files:** `internal/runtime/config.go`, `internal/runtime/notices.go`, `internal/runtime/client.go`, `internal/runtime/config_test.go`
 
-- [ ] Implement `Config` exactly as pinned; defaults: validation 60 s, heartbeat 5 m, shutdown 30 s. Implement degraded-args filtering (remove a standalone `"--continue"` or `"-c"` element) with a unit test.
-- [ ] Implement `Notice`, `NoticeKind` (all ten kinds), and the `Notifier` interface as pinned.
-- [ ] Define the `PiClient` interface as pinned; add a compile-time assertion that `*rpc.Client` satisfies it.
-- [ ] Run `go test ./internal/runtime/`; expect green.
-- [ ] Commit with `feat: add runtime config, notices, and client seam`.
+- [x] Implement `Config` exactly as pinned; defaults: validation 60 s, heartbeat 5 m, shutdown 30 s. Implement degraded-args filtering (remove a standalone `"--continue"` or `"-c"` element) with a unit test. `DefaultConfig` and `DegradedArgs` unit-tested in `config_test.go`, including valued forms that must stay.
+- [x] Implement `Notice`, `NoticeKind` (all ten kinds), and the `Notifier` interface as pinned. `Notice` carries one obvious payload per kind (`Text`, `State`, `Dropped`, `Elapsed`/`LastActivity`); wording stays with the Telegram design.
+- [x] Define the `PiClient` interface as pinned; add a compile-time assertion that `*rpc.Client` satisfies it. The real client's convenience methods (`Prompt`, `Steer`, `GetState`, `GetCommands`, `Abort`, `ClearQueue`, `NewSession`, `GetLastAssistantText`) live in `internal/rpc/commands.go`.
+- [x] Run `go test ./internal/runtime/`; expect green. Verified green; `go test ./...`, `go vet`, `go fix -diff`, gofmt clean.
+- [x] Commit with `feat: add runtime config, notices, and client seam`.
 
 ### Task 9: Coordinator event loop and settled terminal states
 **Delivers:** The long-lived coordinator event loop and operation state machine for the `prompt{steer}` happy path: idle → running → settled, with text, no-text, and failure outcomes.
@@ -482,12 +487,12 @@ Delivers the coordinator that routes every message and produces a visible outcom
 **Traces to:** R4, R5, R7, R9
 **Files:** `internal/runtime/coordinator.go`, `internal/runtime/coordinator_test.go`
 
-- [ ] Implement one long-lived coordinator event loop as the sole consumer of `Events()` and `UIRequests()`; have it own operation state and observe Pi exit through one bounded `Wait` goroutine. Serialize all state transitions through this loop.
-- [ ] Implement `HandleUserInput`: exact-match reserved names (`/status`, `/abort`, `/new`) are reserved (routed in Slice 4); everything else goes to `Prompt` (`prompt` with `streamingBehavior: "steer"`). Return after the RPC response; do not wait for `agent_settled` before accepting the next line.
-- [ ] On `"started"`, enter Running; on `agent_settled`, call `GetLastAssistantText` (`nil` or `""` → `EmptyResponse`; non-empty text → `Response`); classify a failed run from the last assistant message with `stopReason: "error"` and its `errorMessage` (`FailedRun` notice, no retry).
-- [ ] Unit-test with a scripted fake `PiClient`: started → settled-with-text; null and empty-string text → `EmptyResponse`; failed-run classification; fast completion before prompt response; process exit while idle and while Running; active-run second prompt plus `/status`, `/abort`, and `/new` without a second event reader.
-- [ ] Run `go test ./internal/runtime/`; expect green.
-- [ ] Commit with `feat: add coordinator operation loop and settled terminal states`.
+- [x] Implement one long-lived coordinator event loop as the sole consumer of `Events()` and `UIRequests()`; have it own operation state and observe Pi exit through one bounded `Wait` goroutine. Serialize all state transitions through this loop. The exit channel is buffered because nobody drains it after the loop stops; an orderly exit with no shutdown request is a fatal condition.
+- [x] Implement `HandleUserInput`: exact-match reserved names (`/status`, `/abort`, `/new`) are reserved (routed in Slice 4); everything else goes to `Prompt` (`prompt` with `streamingBehavior: "steer"`). Return after the RPC response; do not wait for `agent_settled` before accepting the next line. The begin/result handshake orders the RPC outcome against the event stream; a ctx-cancelled caller compensates so a pending submit cannot block later inputs.
+- [x] On `"started"`, enter Running; on `agent_settled`, call `GetLastAssistantText` (`nil` or `""` → `EmptyResponse`; non-empty text → `Response`); classify a failed run from the last assistant message with `stopReason: "error"` and its `errorMessage` (`FailedRun` notice, no retry). deliberate: a failed final-text query is reported as `RoutingFailure` because no notice kind is pinned for it yet; the process-exit path takes over in the realistic failure case.
+- [x] Unit-test with a scripted fake `PiClient`: started → settled-with-text; null and empty-string text → `EmptyResponse`; failed-run classification; fast completion before prompt response; process exit while idle and while Running; active-run second prompt plus `/status`, `/abort`, and `/new` without a second event reader. Both completion orders converge (events consumed before or after the result command); exit-race tests poll until the fatal error surfaces because one in-flight input can route before the loop observes the exit.
+- [x] Run `go test ./internal/runtime/`; expect green. Verified green with `-race -count=3`.
+- [x] Commit with `feat: add coordinator operation loop and settled terminal states`.
 
 ### Task 10: Handled guard, steer acknowledgment, compaction fallback
 **Delivers:** The remaining prompt-path behaviors: `"handled"` with and without a following run, the steer acknowledgment notice, and the compaction-window fallback.
@@ -495,12 +500,12 @@ Delivers the coordinator that routes every message and produces a visible outcom
 **Traces to:** R5, R6, R7, R8
 **Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend)
 
-- [ ] On `"handled"`: use the already-consumed event order. If `agent_start` arrived before the response, track that run to `agent_settled`; otherwise complete immediately with a notice and never call `GetLastAssistantText` (stale-text guard). This relies on the Pi 1.3.0 contract test for synchronous extension `sendMessage` calls; detached work scheduled after the handler returns is logged as unassociated and is outside this contract.
-- [ ] On `"queued"`: emit `SteerAcknowledged`.
-- [ ] On `Prompt` error: retry once with `Steer` (bare `steer`); on second failure emit `RoutingFailure`; never drop the input silently.
-- [ ] Unit-test with the fake client: handled-no-run → immediate completion without `GetLastAssistantText` (assert it is never called); `agent_start` before handled response → tracked to settled; an event after the handled response is logged as unassociated and not attributed to that input; queued → acknowledgment notice; prompt error → steer retry → queued; both fail → `RoutingFailure`.
-- [ ] Run `go test ./internal/runtime/`; expect green.
-- [ ] Commit with `feat: add handled guard, steer acknowledgment, and compaction fallback`.
+- [x] On `"handled"`: use the already-consumed event order. If `agent_start` arrived before the response, track that run to `agent_settled`; otherwise complete immediately with a notice and never call `GetLastAssistantText` (stale-text guard). This relies on the Pi 1.3.0 contract test for synchronous extension `sendMessage` calls; detached work scheduled after the handler returns is logged as unassociated and is outside this contract. At handled processing the loop also drains the already-enqueued events: the client guarantees event-enqueue-before-response, which closes the only intra-loop scheduling race between the events and command channels.
+- [x] On `"queued"`: emit `SteerAcknowledged`.
+- [x] On `Prompt` error: retry once with `Steer` (bare `steer`); on second failure emit `RoutingFailure`; never drop the input silently.
+- [x] Unit-test with the fake client: handled-no-run → immediate completion without `GetLastAssistantText` (assert it is never called); `agent_start` before handled response → tracked to settled; an event after the handled response is logged as unassociated and not attributed to that input; queued → acknowledgment notice; prompt error → steer retry → queued; both fail → `RoutingFailure`; steer-retry success also tracks a started run. The fake plays wire-order events through `onPrompt`/`onSteer` hooks that run before the canned response returns.
+- [x] Run `go test ./internal/runtime/`; expect green. Verified green with `-race`.
+- [x] Commit with `feat: add handled guard, steer acknowledgment, and compaction fallback`.
 
 ### Task 11: Heartbeat
 **Delivers:** Periodic activity notices during an active operation.
@@ -508,10 +513,10 @@ Delivers the coordinator that routes every message and produces a visible outcom
 **Traces to:** R10
 **Files:** `internal/runtime/heartbeat.go`, `internal/runtime/heartbeat_test.go`
 
-- [ ] While Running, tick every `HeartbeatInterval`: record elapsed time, the type and age of the last observed event from `LastActivity()` (metadata only, no content), and an abort hint; emit a `Heartbeat` notice. Stop ticking on every terminal state.
-- [ ] Unit-test with a tiny configured interval and a delayed fake run: exactly one notice per interval elapse, correct last-event metadata, ticking stops after settlement.
-- [ ] Run `go test ./internal/runtime/`; expect green.
-- [ ] Commit with `feat: add operation heartbeat`.
+- [x] While Running, tick every `HeartbeatInterval`: record elapsed time, the type and age of the last observed event from `LastActivity()` (metadata only, no content), and an abort hint; emit a `Heartbeat` notice. Stop ticking on every terminal state. The ticker is loop-owned; steered inputs join the ongoing run's heartbeat, and ticks stop on terminal states, process exit, and `Close`.
+- [x] Unit-test with a tiny configured interval and a delayed fake run: exactly one notice per interval elapse, correct last-event metadata, ticking stops after settlement. A third test pins the empty-activity payload before any event.
+- [x] Run `go test ./internal/runtime/`; expect green. Verified green with `-race`.
+- [x] Commit with `feat: add operation heartbeat`.
 
 ### Task 12: Minimal REPL
 **Delivers:** The prompt-only demo surface: stdin lines through the coordinator, stdout `Notifier`, clean EOF handling. Reserved commands route in Slice 4.
@@ -519,12 +524,12 @@ Delivers the coordinator that routes every message and produces a visible outcom
 **Traces to:** R18 (prompt subset)
 **Files:** `cmd/trygalle-repl/main.go`
 
-- [ ] Flags: `--pi-bin`, `--session-dir` (required), `--no-continue`, `--heartbeat-interval`, `--shutdown-timeout`, `--help` with an example. stdout carries responses and notices (notices prefixed to distinguish them); diagnostics on stderr. Exit codes: 0 clean EOF, 1 fatal runtime error.
-- [ ] Read lines from stdin and call `runtime.HandleUserInput`; it returns after each command response so the scanner can accept another line while Pi is running. SIGINT/SIGTERM wiring lands in Task 20 (note it in `--help`).
-- [ ] Add an automated `run`-function test with a fake coordinator: while the first prompt remains active, a second prompt and `/status` are routed before settlement; EOF exits cleanly.
-- [ ] Manual check: `go run ./cmd/trygalle-repl --session-dir /tmp/trygalle-demo` with a live Pi and a real model; send one prompt; observe the answer. This is a developer convenience check, not the contract gate.
-- [ ] Run `go vet ./...`; expect clean.
-- [ ] Commit with `feat: add prompt-only repl demo binary`.
+- [x] Flags: `--pi-bin`, `--session-dir` (required), `--no-continue`, `--heartbeat-interval`, `--shutdown-timeout`, `--help` with an example. stdout carries responses and notices (notices prefixed with `[trygalle]` to distinguish them); diagnostics on stderr. Exit codes: 0 clean EOF, 1 fatal runtime error, 2 usage error.
+- [x] Read lines from stdin and call `runtime.HandleUserInput`; it returns after each command response so the scanner can accept another line while Pi is running. SIGINT/SIGTERM wiring lands in Task 20 (noted in `--help`). deliberate: the stdin line buffer is 1 MiB — the no-64-KiB rule is for the framing path; this bounds only the demo surface.
+- [x] Add an automated `run`-function test with a fake coordinator: while the first prompt remains active, a second prompt and `/status` are routed before settlement; EOF exits cleanly. Also covers blank-line skipping, stop-at-fatal routing, `--help` on stdout, and the required-flag diagnostic.
+- [x] Manual check: `go run ./cmd/trygalle-repl --session-dir /tmp/trygalle-demo` with a live Pi and a real model; send one prompt; observe the answer. This is a developer convenience check, not the contract gate. Verified against real pi 1.3.0 with a real model: `Reply with exactly: OK` → response `OK` on stdout, operation started/settled logged on stderr, clean EOF exit 0.
+- [x] Run `go vet ./...`; expect clean.
+- [x] Commit with `feat: add prompt-only repl demo binary`.
 
 ### Slice 4: Reserved commands
 Delivers `/status`, `/abort`, and `/new` with TUI-parity semantics.
