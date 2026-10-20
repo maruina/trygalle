@@ -220,7 +220,7 @@ func TestLastAssistantTextEmpty(t *testing.T) {
 }
 
 func TestLastAssistantTextOmitted(t *testing.T) {
-	// Live Pi 1.0.1 returns data {} when no assistant text exists.
+	// Live Pi 1.3.0 returns data {} when no assistant text exists.
 	var data LastAssistantTextData
 	if err := json.Unmarshal([]byte(`{}`), &data); err != nil {
 		t.Fatalf("unmarshal: %v", err)

@@ -59,7 +59,7 @@ func TestResolveGateVersionMatch(t *testing.T) {
 		t.Fatalf("resolveGate error: %v", err)
 	}
 	if res.bin == "" || res.version != PinnedPiVersion || res.skipReason != "" {
-		t.Errorf("resolve result = %+v, want the fake 1.0.1 binary", res)
+		t.Errorf("resolve result = %+v, want the fake 1.3.0 binary", res)
 	}
 }
 

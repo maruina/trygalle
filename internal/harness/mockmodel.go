@@ -13,7 +13,7 @@ import (
 )
 
 // Constants for the synthetic model registered through the generated
-// models.json. The provider key is "mock"; Pi 1.0.1 accepts it and lists the
+// models.json. The provider key is "mock"; Pi 1.3.0 accepts it and lists the
 // model under --provider mock (verified live; the ollama fallback was not
 // needed).
 const (
