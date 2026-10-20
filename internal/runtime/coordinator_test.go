@@ -22,7 +22,11 @@ type fakeClient struct {
 	promptErr         error
 	// promptScript, when non-empty, takes precedence over the static fields
 	// and is consumed in call order.
-	promptScript     []scriptedPrompt
+	promptScript []scriptedPrompt
+	// onPrompt and onSteer run before the canned result returns, letting a
+	// test play the events Pi emits while producing the response.
+	onPrompt         func()
+	onSteer          func()
 	steerDisposition rpc.Disposition
 	steerErr         error
 	text             *string
@@ -73,16 +77,26 @@ type scriptedPrompt struct {
 
 func (f *fakeClient) Prompt(ctx context.Context, message string) (rpc.Disposition, error) {
 	f.record("prompt")
+	var d rpc.Disposition
+	var err error
 	if len(f.promptScript) == 0 {
-		return f.promptDisposition, f.promptErr
+		d, err = f.promptDisposition, f.promptErr
+	} else {
+		s := f.promptScript[0]
+		f.promptScript = f.promptScript[1:]
+		d, err = s.disposition, s.err
 	}
-	s := f.promptScript[0]
-	f.promptScript = f.promptScript[1:]
-	return s.disposition, s.err
+	if f.onPrompt != nil {
+		f.onPrompt()
+	}
+	return d, err
 }
 
 func (f *fakeClient) Steer(ctx context.Context, message string) (rpc.Disposition, error) {
 	f.record("steer")
+	if f.onSteer != nil {
+		f.onSteer()
+	}
 	return f.steerDisposition, f.steerErr
 }
 
@@ -382,8 +396,12 @@ func TestHandledWithRunTracksToSettlement(t *testing.T) {
 	defer c.Close()
 
 	// Pi emits agent_start before the handled response (pinned by the live
-	// extension ordering test in the harness).
-	f.events <- rpc.Event{Type: "agent_start"}
+	// extension ordering test in the harness); the fake plays it while
+	// producing the response, matching the client's
+	// event-enqueued-before-response guarantee.
+	f.onPrompt = func() {
+		f.events <- rpc.Event{Type: "agent_start"}
+	}
 	if err := c.HandleUserInput(context.Background(), "/mock-run"); err != nil {
 		t.Fatalf("HandleUserInput: %v", err)
 	}
@@ -478,6 +496,21 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 	}
 }
 
+// handleInputUntilFatal routes inputs until the coordinator turns fatal. The
+// exit is observed through one bounded Wait goroutine, so an input racing the
+// death can complete its routing before the loop ends.
+func handleInputUntilFatal(t *testing.T, c *runtime.Coordinator, text string) error {
+	t.Helper()
+	var err error
+	for range 100 {
+		if err = c.HandleUserInput(context.Background(), text); err != nil {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return err
+}
+
 func TestProcessExitWhileIdleIsFatal(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
@@ -486,7 +519,7 @@ func TestProcessExitWhileIdleIsFatal(t *testing.T) {
 	defer c.Close()
 
 	f.die()
-	if err := c.HandleUserInput(context.Background(), "hi"); err == nil {
+	if err := handleInputUntilFatal(t, c, "hi"); err == nil {
 		t.Fatal("HandleUserInput after pi exit = nil error, want fatal")
 	}
 }
@@ -500,7 +533,7 @@ func TestProcessExitWhileRunningIsFatal(t *testing.T) {
 	startRunningOperation(t, f, c)
 
 	f.die()
-	if err := c.HandleUserInput(context.Background(), "second"); err == nil {
+	if err := handleInputUntilFatal(t, c, "second"); err == nil {
 		t.Fatal("HandleUserInput after pi exit during run = nil error, want fatal")
 	}
 	// A dead process produces no settlement outcome.

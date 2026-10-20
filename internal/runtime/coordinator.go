@@ -99,10 +99,14 @@ type Coordinator struct {
 	// readers that observed done closed can read it safely.
 	fatalError error
 
-	// op, pending, and state are owned by the event loop goroutine.
+	// op, pending, state, and the heartbeat ticker are owned by the event
+	// loop goroutine.
 	op      *operation // the running operation, non-nil while stateRunning
 	pending *operation // a submit between the begin and result handshakes
 	state   opState
+
+	hbTicker *time.Ticker // non-nil while an operation runs
+	hbC      <-chan time.Time
 }
 
 // NewCoordinator starts the coordinator event loop. Close stops it.
@@ -232,6 +236,8 @@ func (c *Coordinator) loop() {
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)
+		case <-c.hbC:
+			c.heartbeatTick()
 		case u := <-c.client.UIRequests():
 			c.handleUIRequest(u)
 		case err := <-exitCh:
@@ -244,8 +250,10 @@ func (c *Coordinator) loop() {
 			default:
 				c.fail(fmt.Errorf("pi failed: %w", err))
 			}
+			c.stopHeartbeat()
 			return
 		case <-c.stop:
+			c.stopHeartbeat()
 			return
 		}
 	}
@@ -363,6 +371,7 @@ func (c *Coordinator) startOperation(pending *operation) bool {
 	pending.startedAt = time.Now()
 	c.op = pending
 	c.state = stateRunning
+	c.startHeartbeat()
 	c.log.Info("operation started")
 	return true
 }
@@ -374,6 +383,7 @@ func (c *Coordinator) settleCurrentOperation() {
 	}
 	c.op = nil
 	c.state = stateIdle
+	c.stopHeartbeat()
 	c.log.Info("operation settled")
 	c.settleOperation(op)
 }
