@@ -191,6 +191,42 @@ func TestDeadlineExpiry(t *testing.T) {
 	}
 }
 
+// TestCanceledContextDoesNotWrite proves a caller that already gave up sends
+// nothing: cancellation must never deliver a command the caller reports as
+// failed, because a retry would then duplicate it.
+func TestCanceledContextDoesNotWrite(t *testing.T) {
+	s := newScripted(t, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.client.Send(ctx, PromptCommand("never sent", "steer")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send error = %v, want context canceled", err)
+	}
+	select {
+	case rec := <-s.wrote:
+		t.Fatalf("command written with a canceled context: %s", rec)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestCommandErrorOnRejection proves a success=false response is a typed
+// CommandError, the only failure a bounded retry may repeat.
+func TestCommandErrorOnRejection(t *testing.T) {
+	s := newScripted(t, discardLogger())
+	go func() {
+		cmd := s.wroteCommand()
+		s.emit(`{"id":` + jsonQuote(cmd.ID) + `,"type":"response","command":"prompt","success":false,"error":"compaction in progress"}`)
+	}()
+
+	_, err := s.client.Prompt(context.Background(), "hi")
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("Prompt error = %v, want *CommandError", err)
+	}
+	if cmdErr.Command != "prompt" || cmdErr.Message != "compaction in progress" {
+		t.Errorf("CommandError = %+v", cmdErr)
+	}
+}
+
 // TestFastCompletionBeforeResponse proves events emitted before a command
 // response are not lost (R2 subscription-ordering scenario).
 func TestFastCompletionBeforeResponse(t *testing.T) {

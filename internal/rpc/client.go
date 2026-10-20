@@ -156,7 +156,12 @@ func (c *Client) LastActivity() Activity {
 
 // Send sends one command and waits for its correlated response, the client's
 // terminal failure, or ctx cancellation. Send always assigns the request ID.
+// A caller whose context is already done sends nothing, so cancellation can
+// never deliver a command that the caller then believes failed.
 func (c *Client) Send(ctx context.Context, cmd Command) (Response, error) {
+	if err := ctx.Err(); err != nil {
+		return Response{}, err
+	}
 	cmd.ID = c.claimID()
 	ch := make(chan clientResult, 1)
 	c.mu.Lock()
