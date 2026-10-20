@@ -2,10 +2,10 @@ package runtime_test
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -313,7 +313,7 @@ func TestFailedRunClassifiedFromAssistantMessage(t *testing.T) {
 func TestPromptErrorRetriesOnceWithSteerQueued(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
-	f.promptErr = errors.New("cannot prompt during compaction")
+	f.promptErr = &rpc.CommandError{Command: "prompt", Message: "cannot prompt during compaction"}
 	f.steerDisposition = rpc.DispositionQueued
 	c := newTestCoordinator(t, f, n)
 	defer c.Close()
@@ -330,8 +330,8 @@ func TestPromptErrorRetriesOnceWithSteerQueued(t *testing.T) {
 func TestPromptAndSteerBothFailureRoutes(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
-	f.promptErr = errors.New("prompt rejected")
-	f.steerErr = errors.New("steer rejected")
+	f.promptErr = &rpc.CommandError{Command: "prompt", Message: "prompt rejected"}
+	f.steerErr = &rpc.CommandError{Command: "steer", Message: "steer rejected"}
 	c := newTestCoordinator(t, f, n)
 	defer c.Close()
 
@@ -350,7 +350,7 @@ func TestPromptAndSteerBothFailureRoutes(t *testing.T) {
 func TestPromptErrorSteerStartsOperation(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
-	f.promptErr = errors.New("cannot prompt during compaction")
+	f.promptErr = &rpc.CommandError{Command: "prompt", Message: "cannot prompt during compaction"}
 	f.steerDisposition = rpc.DispositionStarted
 	f.text = new("after compaction")
 	c := newTestCoordinator(t, f, n)
@@ -363,6 +363,48 @@ func TestPromptErrorSteerStartsOperation(t *testing.T) {
 	f.events <- rpc.Event{Type: "agent_settled"}
 	if got := n.waitForResponse(t); got != "after compaction" {
 		t.Errorf("response = %q, want %q", got, "after compaction")
+	}
+}
+
+func TestTransportFailureDoesNotRetryWithSteer(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	// A transport failure or a canceled caller may already have delivered
+	// the prompt, so only an explicit Pi rejection is retried.
+	f.promptErr = rpc.ErrProcessExited
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "hi"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if calls := f.getCalls(); !slices.Equal(calls, []string{"prompt"}) {
+		t.Errorf("calls = %v, want [prompt] and no steer retry", calls)
+	}
+}
+
+func TestCanceledCallerDoesNotStrandPending(t *testing.T) {
+	// A caller that gives up must not leave the coordinator unable to accept
+	// the next input (the begin/result handshake outlives the caller).
+	for range 50 {
+		f := newFakeClient()
+		n := newRecordingNotifier()
+		c := newTestCoordinator(t, f, n)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		f.promptErr = context.Canceled
+		f.steerErr = context.Canceled
+		f.onPrompt = cancel
+		_ = c.HandleUserInput(ctx, "hi")
+
+		if err := c.HandleUserInput(context.Background(), "second"); err != nil {
+			t.Fatalf("input after a canceled caller = %v, want the input to route", err)
+		}
+		if calls := f.getCalls(); !slices.Equal(calls, []string{"prompt", "prompt"}) {
+			t.Fatalf("calls = %v, want [prompt prompt] with no steer retry", calls)
+		}
+		c.Close()
 	}
 }
 
@@ -442,6 +484,48 @@ func TestEventAfterHandledResponseIsUnassociated(t *testing.T) {
 	f.events <- rpc.Event{Type: "agent_settled"}
 	if got := n.waitForResponse(t); got != "second" {
 		t.Errorf("response = %q, want %q", got, "second")
+	}
+}
+
+func TestHandledMidRunEmitsExtensionHandled(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("active run text")
+	f.promptScript = []scriptedPrompt{
+		{disposition: rpc.DispositionStarted},
+		{disposition: rpc.DispositionHandled},
+	}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	// An extension command consumed the input while the run was active: it
+	// executed, started no run of its own, and the run continues.
+	if err := c.HandleUserInput(context.Background(), "/mock-notify"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeExtensionHandled)
+
+	// The active run keeps its attribution: its settlement still responds.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "active run text" {
+		t.Errorf("response = %q, want %q", got, "active run text")
+	}
+}
+
+func TestUnexpectedDispositionEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptDisposition = rpc.Disposition("teleported")
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "hi"); err == nil {
+		t.Error("HandleUserInput with an unknown disposition = nil error, want an error")
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if !strings.Contains(notice.Text, "teleported") {
+		t.Errorf("RoutingFailure text = %q, want the unexpected disposition", notice.Text)
 	}
 }
 

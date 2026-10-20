@@ -70,6 +70,7 @@ const (
 
 type coordCommand struct {
 	kind        cmdKind
+	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
 	err         error
 	ack         chan error
@@ -146,30 +147,44 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 		return nil
 	}
 
-	if err := c.sendCommand(ctx, coordCommand{kind: cmdBegin}); err != nil {
+	// submit identifies this handshake, so a late or compensating result
+	// command can only clear the pending submit it belongs to.
+	submit := &operation{}
+	if err := c.sendCommand(ctx, coordCommand{kind: cmdBegin, op: submit}); err != nil {
 		if ctx.Err() != nil {
-			// The caller gave up. Clear the possibly-registered pending
-			// submit so a later input is not held hostage by it. The loop
-			// answers the ack promptly; if Pi died instead, the fatal error
-			// wins either way.
-			_ = c.sendCommand(context.Background(), coordCommand{kind: cmdResult, err: ctx.Err()})
+			// The caller gave up after the begin may have registered the
+			// submit. Clear it so a later input is not held hostage by it;
+			// the loop ignores the command when submit is no longer pending.
+			_ = c.sendCommand(context.Background(), coordCommand{kind: cmdResult, op: submit, err: ctx.Err()})
 		}
 		return err
 	}
 
 	disposition, err := c.client.Prompt(ctx, text)
-	if err != nil {
+	if err != nil && isCommandRejection(err) {
 		// prompt rejects input while compaction is in progress, while steer
 		// queues during it; retry once with bare steer so the queue stays
 		// with Pi and Trygalle stays stateless (design "Message routing").
-		c.log.Info("prompt failed; retrying once with bare steer")
+		// Only an explicit Pi rejection retries: a transport failure or a
+		// canceled caller may already have delivered the prompt.
+		c.log.Info("prompt rejected; retrying once with bare steer", "error", err)
 		disposition, err = c.client.Steer(ctx, text)
 	}
-	return c.sendResult(ctx, disposition, err)
+	// The result handshake uses a coordinator-owned context: the loop must
+	// learn the outcome even when the caller gave up, or pending state strands
+	// and every later input fails errInputInFlight.
+	return c.sendResult(context.Background(), submit, disposition, err)
 }
 
-func (c *Coordinator) sendResult(ctx context.Context, d Disposition, err error) error {
-	return c.sendCommand(ctx, coordCommand{kind: cmdResult, disposition: d, err: err})
+// isCommandRejection reports whether Pi explicitly rejected the prompt, the
+// only failure for which a retry cannot duplicate a delivered message.
+func isCommandRejection(err error) bool {
+	var cmdErr *rpc.CommandError
+	return errors.As(err, &cmdErr)
+}
+
+func (c *Coordinator) sendResult(ctx context.Context, op *operation, d Disposition, err error) error {
+	return c.sendCommand(ctx, coordCommand{kind: cmdResult, op: op, disposition: d, err: err})
 }
 
 // sendCommand hands one internal command to the event loop and waits for its
@@ -267,21 +282,21 @@ func (c *Coordinator) fail(err error) {
 }
 
 func (c *Coordinator) handleBegin(cmd coordCommand) {
-	if c.pendingOperation() != nil {
+	if c.pending != nil {
 		cmd.ack <- errInputInFlight
 		return
 	}
-	c.pending = &operation{}
+	c.pending = cmd.op
 	cmd.ack <- nil
 }
 
 func (c *Coordinator) handleResult(cmd coordCommand) {
-	pending := c.pending
-	c.pending = nil
-	if pending == nil {
+	if c.pending == nil || c.pending != cmd.op {
 		cmd.ack <- errNoPendingInput
 		return
 	}
+	pending := c.pending
+	c.pending = nil
 	if cmd.err != nil {
 		// A submission that failed to reach Pi is a routing failure; the
 		// input is never dropped silently (design "Message routing").
@@ -312,7 +327,13 @@ func (c *Coordinator) handleResult(cmd coordCommand) {
 	case DispositionHandled:
 		c.handleHandled(pending, cmd)
 	default:
+		// A disposition outside the pinned set means protocol drift; the
+		// input is never dropped silently (design "Message routing").
 		c.log.Error("unexpected disposition", "disposition", cmd.disposition)
+		c.notifier.Notice(context.Background(), Notice{
+			Kind: NoticeRoutingFailure,
+			Text: fmt.Sprintf("unexpected disposition %q", cmd.disposition),
+		})
 		cmd.ack <- fmt.Errorf("unexpected disposition %q", cmd.disposition)
 	}
 }
@@ -325,9 +346,12 @@ func (c *Coordinator) handleHandled(pending *operation, cmd coordCommand) {
 	c.drainEvents()
 	switch {
 	case c.op != nil:
-		// An extension command handled mid-run: outside this slice's
-		// attribution contract; logged unassociated.
+		// An extension command handled mid-run: it executed, no run started
+		// for it, and the active run continues, so the input gets its own
+		// outcome instead of silence. deliberate: the wording is a placeholder
+		// until the Telegram design owns notice text.
 		c.log.Info("handled input while an operation is running")
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeExtensionHandled})
 	case pending.hasRun:
 		// The extension run's agent_start was observed (or already drained)
 		// before the response: track the run to its own agent_settled.
@@ -487,12 +511,6 @@ func (c *Coordinator) noteMessage(m *rpc.Message) {
 		return
 	}
 	target.lastAssistant = m
-}
-
-// pendingOperation returns the pending submit; a nil return means no input is
-// currently in flight between the begin and result handshakes.
-func (c *Coordinator) pendingOperation() *operation {
-	return c.pending
 }
 
 // handleUIRequest answers every blocking extension dialog immediately with

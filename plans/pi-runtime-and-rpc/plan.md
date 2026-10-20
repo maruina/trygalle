@@ -171,7 +171,7 @@ type Notifier interface {
 	Notice(ctx context.Context, notice Notice)
 }
 ```
-`Notice` carries a `NoticeKind` and a small data payload; wording is owned by the Telegram design. Kinds: `Status`, `SteerAcknowledged`, `EmptyResponse`, `FailedRun`, `AbortReport`, `NewSessionReport`, `SessionResumeFailed`, `Heartbeat`, `RoutingFailure`, `RestartNotice`.
+`Notice` carries a `NoticeKind` and a small data payload; wording is owned by the Telegram design. Kinds: `Status`, `SteerAcknowledged`, `ExtensionHandled`, `EmptyResponse`, `FailedRun`, `AbortReport`, `NewSessionReport`, `SessionResumeFailed`, `Heartbeat`, `RoutingFailure`, `RestartNotice`. `ExtensionHandled` extends the original ten: it is the outcome of an extension command that consumed a mid-run input without starting a run.
 
 **Config** (`internal/runtime/config.go`):
 ```go
@@ -502,8 +502,9 @@ Delivers the coordinator that routes every message and produces a visible outcom
 
 - [x] On `"handled"`: use the already-consumed event order. If `agent_start` arrived before the response, track that run to `agent_settled`; otherwise complete immediately with a notice and never call `GetLastAssistantText` (stale-text guard). This relies on the Pi 1.3.0 contract test for synchronous extension `sendMessage` calls; detached work scheduled after the handler returns is logged as unassociated and is outside this contract. At handled processing the loop also drains the already-enqueued events: the client guarantees event-enqueue-before-response, which closes the only intra-loop scheduling race between the events and command channels.
 - [x] On `"queued"`: emit `SteerAcknowledged`.
+- [x] On `"handled"` while an operation is already running: emit `ExtensionHandled`, because the command executed, no run started for it, and the active run continues. An unknown disposition emits `RoutingFailure`; neither path is silent.
 - [x] On `Prompt` error: retry once with `Steer` (bare `steer`); on second failure emit `RoutingFailure`; never drop the input silently.
-- [x] Unit-test with the fake client: handled-no-run → immediate completion without `GetLastAssistantText` (assert it is never called); `agent_start` before handled response → tracked to settled; an event after the handled response is logged as unassociated and not attributed to that input; queued → acknowledgment notice; prompt error → steer retry → queued; both fail → `RoutingFailure`; steer-retry success also tracks a started run. The fake plays wire-order events through `onPrompt`/`onSteer` hooks that run before the canned response returns.
+- [x] Unit-test with the fake client: handled-no-run → immediate completion without `GetLastAssistantText` (assert it is never called); `agent_start` before handled response → tracked to settled; handled mid-run → `ExtensionHandled` with the active run still settling into its own response; unknown disposition → `RoutingFailure`; an event after the handled response is logged as unassociated and not attributed to that input; queued → acknowledgment notice; prompt error → steer retry → queued; both fail → `RoutingFailure`; steer-retry success also tracks a started run. The fake plays wire-order events through `onPrompt`/`onSteer` hooks that run before the canned response returns.
 - [x] Run `go test ./internal/runtime/`; expect green. Verified green with `-race`.
 - [x] Commit with `feat: add handled guard, steer acknowledgment, and compaction fallback`.
 
