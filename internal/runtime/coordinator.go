@@ -154,9 +154,13 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 	}
 
 	disposition, err := c.client.Prompt(ctx, text)
-	// Task 10 inserts one bare-steer retry here for a failed prompt (the
-	// compaction window). This slice reports the failure directly so the
-	// input is never dropped silently.
+	if err != nil {
+		// prompt rejects input while compaction is in progress, while steer
+		// queues during it; retry once with bare steer so the queue stays
+		// with Pi and Trygalle stays stateless (design "Message routing").
+		c.log.Info("prompt failed; retrying once with bare steer")
+		disposition, err = c.client.Steer(ctx, text)
+	}
 	return c.sendResult(ctx, disposition, err)
 }
 
@@ -291,10 +295,60 @@ func (c *Coordinator) handleResult(cmd coordCommand) {
 			c.settleCurrentOperation()
 		}
 		cmd.ack <- nil
+	case DispositionQueued:
+		// The input steered into the active run; acceptance only. The run's
+		// operation completes at agent_settled, and the steered text is part
+		// of that run's single final response.
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeSteerAcknowledged})
+		cmd.ack <- nil
+	case DispositionHandled:
+		c.handleHandled(pending, cmd)
 	default:
-		// queued and handled handling lands with Task 10.
 		c.log.Error("unexpected disposition", "disposition", cmd.disposition)
 		cmd.ack <- fmt.Errorf("unexpected disposition %q", cmd.disposition)
+	}
+}
+
+// handleHandled attributes a handled input (design "Operation state machine"):
+// an extension handler consumed the prompt, and through pi.sendMessage it may
+// have synchronously started its own run. For that pinned Pi path, agent_start
+// for the run arrives before the handled response on the wire.
+func (c *Coordinator) handleHandled(pending *operation, cmd coordCommand) {
+	c.drainEvents()
+	switch {
+	case c.op != nil:
+		// An extension command handled mid-run: outside this slice's
+		// attribution contract; logged unassociated.
+		c.log.Info("handled input while an operation is running")
+	case pending.hasRun:
+		// The extension run's agent_start was observed (or already drained)
+		// before the response: track the run to its own agent_settled.
+		c.startOperation(pending)
+		if pending.settled {
+			c.settleCurrentOperation()
+		}
+	default:
+		// Stale-text guard: no run belongs to this input, so the last
+		// assistant text could only be the previous run's. Complete the
+		// input immediately without querying Pi.
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeEmptyResponse})
+	}
+	cmd.ack <- nil
+}
+
+// drainEvents processes every event already enqueued by the client, without
+// blocking. The client enqueues an event before the response of any record Pi
+// emitted after the event, so an agent_start delivered before a response is
+// in the channel buffer when the response arrives; this closes the only
+// remaining scheduling race between the events and command channels.
+func (c *Coordinator) drainEvents() {
+	for {
+		select {
+		case e := <-c.client.Events():
+			c.handleEvent(e)
+		default:
+			return
+		}
 	}
 }
 

@@ -20,10 +20,13 @@ import (
 type fakeClient struct {
 	promptDisposition rpc.Disposition
 	promptErr         error
-	steerDisposition  rpc.Disposition
-	steerErr          error
-	text              *string
-	textErr           error
+	// promptScript, when non-empty, takes precedence over the static fields
+	// and is consumed in call order.
+	promptScript     []scriptedPrompt
+	steerDisposition rpc.Disposition
+	steerErr         error
+	text             *string
+	textErr          error
 
 	// events carries the state events the test plays. An event pushed before
 	// the canned prompt response returns matches the wire-order guarantee the
@@ -62,9 +65,20 @@ func (f *fakeClient) getCalls() []string {
 	return slices.Clone(f.calls)
 }
 
+// scriptedPrompt is one canned prompt outcome.
+type scriptedPrompt struct {
+	disposition rpc.Disposition
+	err         error
+}
+
 func (f *fakeClient) Prompt(ctx context.Context, message string) (rpc.Disposition, error) {
 	f.record("prompt")
-	return f.promptDisposition, f.promptErr
+	if len(f.promptScript) == 0 {
+		return f.promptDisposition, f.promptErr
+	}
+	s := f.promptScript[0]
+	f.promptScript = f.promptScript[1:]
+	return s.disposition, s.err
 }
 
 func (f *fakeClient) Steer(ctx context.Context, message string) (rpc.Disposition, error) {
@@ -282,10 +296,28 @@ func TestFailedRunClassifiedFromAssistantMessage(t *testing.T) {
 	}
 }
 
-func TestPromptErrorIsRoutingFailure(t *testing.T) {
+func TestPromptErrorRetriesOnceWithSteerQueued(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptErr = errors.New("cannot prompt during compaction")
+	f.steerDisposition = rpc.DispositionQueued
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "hi"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeSteerAcknowledged)
+	if calls := f.getCalls(); !slices.Equal(calls, []string{"prompt", "steer"}) {
+		t.Errorf("calls = %v, want [prompt, steer]", calls)
+	}
+}
+
+func TestPromptAndSteerBothFailureRoutes(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
 	f.promptErr = errors.New("prompt rejected")
+	f.steerErr = errors.New("steer rejected")
 	c := newTestCoordinator(t, f, n)
 	defer c.Close()
 
@@ -295,6 +327,103 @@ func TestPromptErrorIsRoutingFailure(t *testing.T) {
 	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
 	if notice.Text == "" {
 		t.Error("RoutingFailure must carry the failure cause")
+	}
+	if calls := f.getCalls(); !slices.Equal(calls, []string{"prompt", "steer"}) {
+		t.Errorf("calls = %v, want [prompt, steer]", calls)
+	}
+}
+
+func TestPromptErrorSteerStartsOperation(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptErr = errors.New("cannot prompt during compaction")
+	f.steerDisposition = rpc.DispositionStarted
+	f.text = new("after compaction")
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "hi"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "after compaction" {
+		t.Errorf("response = %q, want %q", got, "after compaction")
+	}
+}
+
+func TestHandledWithoutRunCompletesImmediately(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("previous run text")
+	f.promptDisposition = rpc.DispositionHandled
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/mock-notify"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	// The stale-text guard: the completion never queries Pi for text, so a
+	// corrupt or stale last-assistant text cannot leak into the response.
+	if notice := n.waitForNotice(t, runtime.NoticeEmptyResponse); notice.Kind != runtime.NoticeEmptyResponse {
+		t.Errorf("notice kind = %q", notice.Kind)
+	}
+	if calls := f.getCalls(); slices.Contains(calls, "get_last_assistant_text") {
+		t.Errorf("stale-text guard violated; calls = %v", calls)
+	}
+}
+
+func TestHandledWithRunTracksToSettlement(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("extension run text")
+	f.promptDisposition = rpc.DispositionHandled
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	// Pi emits agent_start before the handled response (pinned by the live
+	// extension ordering test in the harness).
+	f.events <- rpc.Event{Type: "agent_start"}
+	if err := c.HandleUserInput(context.Background(), "/mock-run"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "extension run text" {
+		t.Errorf("response = %q, want %q", got, "extension run text")
+	}
+}
+
+func TestEventAfterHandledResponseIsUnassociated(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptDisposition = rpc.DispositionHandled
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/mock-notify"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeEmptyResponse)
+
+	// Detached fire-and-forget work the extension scheduled after its handler
+	// returned: observed, logged, and never attributed.
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+
+	// A later clean input produces exactly its own outcome; the detached
+	// events added no settlement, response, or failure of their own.
+	f.promptScript = []scriptedPrompt{
+		{disposition: rpc.DispositionStarted},
+	}
+	f.text = new("second")
+	if err := c.HandleUserInput(context.Background(), "proper input"); err != nil {
+		t.Fatalf("second HandleUserInput: %v", err)
+	}
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "second" {
+		t.Errorf("response = %q, want %q", got, "second")
 	}
 }
 
@@ -327,8 +456,15 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 	defer c.Close()
 	startRunningOperation(t, f, c)
 
-	// Reserved names route while the first run is active, without spawning a
-	// second event consumer.
+	// While the run is active, a second prompt steers and the reserved names
+	// route, without spawning a second event consumer.
+	f.promptScript = []scriptedPrompt{
+		{disposition: rpc.DispositionQueued},
+	}
+	if err := c.HandleUserInput(context.Background(), "steer me"); err != nil {
+		t.Fatalf("HandleUserInput while active: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeSteerAcknowledged)
 	for _, cmd := range []string{"/status", "/abort", "/new"} {
 		if err := c.HandleUserInput(context.Background(), cmd); err != nil {
 			t.Errorf("%s while active: %v", cmd, err)
