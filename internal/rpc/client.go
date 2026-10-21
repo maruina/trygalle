@@ -54,9 +54,9 @@ type Client struct {
 	events chan Event
 	ui     chan UIRequest
 
-	// writeMu serializes records on stdin. CloseStdin does not take it, so
+	// writeGate serializes records on stdin. CloseStdin does not take it, so
 	// closing stdin releases a write blocked on a child that stopped reading.
-	writeMu     sync.Mutex
+	writeGate   chan struct{}
 	stdinClosed atomic.Bool
 
 	// readDone closes when readLoop returns. os/exec closes stdout in Wait, so
@@ -124,15 +124,16 @@ func New(bin string, args []string, opts ...Option) (*Client, error) {
 // the process tests use it with a helper child.
 func newClient(stdin io.WriteCloser, stdout io.Reader, log *slog.Logger, kill func() error) *Client {
 	return &Client{
-		log:      log,
-		stdin:    stdin,
-		stdout:   stdout,
-		kill:     kill,
-		events:   make(chan Event, eventBuffer),
-		ui:       make(chan UIRequest, uiBuffer),
-		pending:  make(map[string]chan clientResult),
-		readDone: make(chan struct{}),
-		died:     make(chan struct{}),
+		log:       log,
+		stdin:     stdin,
+		writeGate: make(chan struct{}, 1),
+		stdout:    stdout,
+		kill:      kill,
+		events:    make(chan Event, eventBuffer),
+		ui:        make(chan UIRequest, uiBuffer),
+		pending:   make(map[string]chan clientResult),
+		readDone:  make(chan struct{}),
+		died:      make(chan struct{}),
 	}
 }
 
@@ -169,7 +170,7 @@ func (c *Client) Send(ctx context.Context, cmd Command) (Response, error) {
 	c.mu.Unlock()
 	defer c.forget(cmd.ID)
 
-	if err := c.write(cmd); err != nil {
+	if err := c.write(ctx, cmd); err != nil {
 		return Response{}, err
 	}
 	return c.awaitResponse(ctx, ch)
@@ -197,8 +198,8 @@ func (c *Client) responseOrTerminal(ch <-chan clientResult) (Response, error) {
 }
 
 // AnswerUIDialog answers an extension dialog request by cancelling it.
-func (c *Client) AnswerUIDialog(_ context.Context, id string) error {
-	return c.write(CancelledUIResponse(id))
+func (c *Client) AnswerUIDialog(ctx context.Context, id string) error {
+	return c.write(ctx, CancelledUIResponse(id))
 }
 
 // CloseStdin requests an orderly pi shutdown. It is idempotent.
@@ -244,13 +245,36 @@ func (c *Client) forget(id string) {
 	delete(c.pending, id)
 }
 
-func (c *Client) write(v any) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+func (c *Client) write(ctx context.Context, v any) error {
+	select {
+	case c.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.died:
+		return pendingErr(c.Wait())
+	}
+	defer func() { <-c.writeGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.stdinClosed.Load() {
 		return errStdinClosed
 	}
-	return WriteRecord(c.stdin, v)
+	// Cancellation during a write may leave a partial record. Terminate the
+	// transport instead of allowing another command onto an uncertain stream.
+	cancelled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(cancelled)
+		c.finish(ctx.Err())
+		_ = c.CloseStdin()
+		_ = c.Kill()
+	})
+	err := WriteRecord(c.stdin, v)
+	if !stop() {
+		<-cancelled
+		return ctx.Err()
+	}
+	return err
 }
 
 // readLoop drains stdout continuously and routes records. It runs until the

@@ -30,6 +30,8 @@ const maxLineSize = 1 << 20
 // The real *runtime.Coordinator satisfies it.
 type inputHandler interface {
 	HandleUserInput(ctx context.Context, text string) error
+	Done() <-chan struct{}
+	Wait() error
 }
 
 var errUsage = errors.New("usage")
@@ -74,7 +76,7 @@ func main() {
 }
 
 // command is the process entry logic; it returns the process exit cause.
-func command(argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func command(argv []string, stdin io.ReadCloser, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("trygalle-repl", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(stdout, usage) }
 	piBin := fs.String("pi-bin", "pi", "pi binary to run")
@@ -148,22 +150,60 @@ func buildArgs(noContinue bool, sessionDir string) []string {
 // on clean EOF (nil) or with the coordinator's fatal error. Because
 // HandleUserInput returns after the RPC response, this loop accepts further
 // lines while a run is active.
-func run(ctx context.Context, stdin io.Reader, stdout io.Writer, handler inputHandler) error {
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+func run(ctx context.Context, stdin io.ReadCloser, stdout io.Writer, handler inputHandler) error {
+	// The caller transfers stdin ownership; Close must interrupt a pending
+	// Read so the single reader goroutine can always be joined.
+	lines := make(chan string)
+	readerDone := make(chan struct{})
+	stop := make(chan struct{})
+	var readErr error
+	go func() {
+		defer close(readerDone)
+		defer close(lines)
+		scanner := bufio.NewScanner(stdin)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-stop:
+				return
+			}
 		}
-		if err := handler.HandleUserInput(ctx, line); err != nil {
-			return err
+		readErr = scanner.Err()
+	}()
+	defer func() {
+		close(stop)
+		_ = stdin.Close()
+		<-readerDone
+	}()
+	for {
+		select {
+		case <-handler.Done():
+			return handler.Wait()
+		case <-ctx.Done():
+			return ctx.Err()
+		case line, ok := <-lines:
+			if !ok {
+				<-readerDone
+				select {
+				case <-handler.Done():
+					return handler.Wait()
+				default:
+				}
+				if readErr != nil {
+					return fmt.Errorf("read stdin: %w", readErr)
+				}
+				return nil
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if err := handler.HandleUserInput(ctx, line); err != nil {
+				return err
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stdin: %w", err)
-	}
-	return nil
 }
 
 // waitPiExit waits for pi's orderly exit up to the shutdown deadline, killing

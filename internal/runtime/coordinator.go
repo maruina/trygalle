@@ -134,6 +134,15 @@ func (c *Coordinator) Close() {
 	c.closeOnce.Do(func() { close(c.stop) })
 }
 
+// Done closes when the coordinator stops.
+func (c *Coordinator) Done() <-chan struct{} { return c.done }
+
+// Wait returns the terminal error after the coordinator stops.
+func (c *Coordinator) Wait() error {
+	<-c.done
+	return c.terminalError()
+}
+
 // HandleUserInput routes one user input. Reserved commands are recognized but
 // routed in Slice 4; everything else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
@@ -296,7 +305,7 @@ func (c *Coordinator) handleResult(cmd coordCommand) {
 		return
 	}
 	pending := c.pending
-	c.pending = nil
+	defer func() { c.pending = nil }()
 	if cmd.err != nil {
 		// A submission that failed to reach Pi is a routing failure; the
 		// input is never dropped silently (design "Message routing").
@@ -522,7 +531,9 @@ func (c *Coordinator) handleUIRequest(u UIRequest) {
 	switch u.Method {
 	case "select", "confirm", "input", "editor":
 		c.log.Info("cancelling extension dialog", "method", u.Method)
-		if err := c.client.AnswerUIDialog(context.Background(), u.ID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		defer cancel()
+		if err := c.client.AnswerUIDialog(ctx, u.ID); err != nil {
 			c.log.Error("answer extension dialog", "error", err)
 		}
 	default:
