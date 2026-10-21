@@ -4,7 +4,7 @@
 
 **Goal:** Implement the approved Pi runtime and RPC design (`plans/pi-runtime-and-rpc/design.md`) as the Go `internal/rpc`, `internal/harness`, and `internal/runtime` packages plus a `cmd/trygalle-repl` demo binary, validated by a live contract-test suite against the pinned Pi 1.3.0.
 **Smallest developer-feedback slice:** A live `get_state`/`get_commands` round-trip against the real installed Pi from Go (Slice 1) — the first observable proof that Trygalle speaks Pi's JSONL RPC protocol over the process boundary. The first interactive prompt/response demo uses a mock model through the dev-only `cmd/trygalle-repl` in Slice 3, Task 12.
-**Out of Scope:** Telegram presentation, formatting, delivery, and notice wording (follow-up #2); container image, dotfiles mapping, project trust (follow-up #3); Kubernetes objects and grace periods (follow-up #4); log schema and redaction policy (follow-up #5); bridging extension dialogs to Telegram; streaming response edits or typing indicators; any queue, session store, or watchdog inside Trygalle; CI pipeline definition; lint configuration; a `Makefile`.
+**Out of Scope:** Telegram presentation, formatting, delivery, and notice wording (follow-up #2); container image, dotfiles mapping, project trust (follow-up #3); Kubernetes objects and grace periods (follow-up #4); log schema and redaction policy (follow-up #5); bridging extension dialogs to Telegram; streaming response edits or typing indicators; any queue, session store, or watchdog inside Trygalle; lint configuration; a `Makefile`.
 **Architecture:** One long-lived Pi subprocess per Trygalle process, spoken to over strict JSONL on stdin/stdout. `internal/rpc` owns framing, records, and the client. `internal/runtime` owns the operation state machine, routing, lifecycle ladder, and shutdown. Pi is the authority on session and run state; the coordinator tracks operations for attribution and visibility only.
 **Tech Stack:** Go 1.27 (stdlib only, no third-party dependencies), Pi 1.3.0 CLI (`--mode rpc`), `httptest` mock model server for live tests, `log/slog` for lifecycle logging.
 
@@ -54,7 +54,7 @@
 ### Key Decisions
 - **Package names without a `pi` prefix** (user decision): `internal/rpc`, `internal/harness`, `internal/runtime`.
 - **Live tests are the primary protocol strategy**: contract tests run against real Pi 1.3.0 with a mock model server. Unit tests cover framing fault injection, deadline expiry, and coordinator state-machine interleavings that are easier to drive deterministically with a scripted client.
-- **Test configuration**: `TRYGALLE_PI_BIN` (path override; default `pi` from `PATH`) and `TRYGALLE_PI_TESTS` = `auto` (default: run when Pi 1.3.0 is available, skip with instructions otherwise) | `on` (fail when unavailable or the version differs from 1.3.0) | `off` (always skip). CI pipeline work is out of scope; any future workflow must install Pi 1.3.0 and set `TRYGALLE_PI_TESTS=on`.
+- **Test configuration**: `TRYGALLE_PI_BIN` (path override; default `pi` from `PATH`) and `TRYGALLE_PI_TESTS` = `auto` (default: run when Pi 1.3.0 is available, skip with instructions otherwise) | `on` (fail when unavailable or the version differs from 1.3.0) | `off` (always skip). The workflow in `.github/workflows/ci.yml` runs a short job (`-race -short`; live tests skip by design) on every pull request and push, plus a full job that installs Pi 1.3.0 and sets `TRYGALLE_PI_TESTS=on`.
 - **Mock model server** registers through `models.json` with `api: "openai-completions"` and `baseUrl` pointing at an `httptest` server. Provider key `mock`; if Pi 1.3.0 requires a known provider id, fall back to key `ollama` with the same `baseUrl` override — verified in Task 6 with a pinned assertion either way.
 - **Zero third-party dependencies**: the whole component uses the Go standard library only.
 - **Logging**: `log/slog` with lifecycle metadata by request/operation identifier. No prompt bodies, tool output, or dialog content. The full schema is owned by follow-up #5.
@@ -67,6 +67,7 @@
 - Pi is the authority on session and run state. Never add session-file parsing, command expansion, queueing, or completion detection as competing sources of behavior.
 - Subscribe to events before the first command is sent (a fast completion can emit events before a late subscriber attaches).
 - The coordinator has one long-lived event loop that is the sole consumer of `Events()` and `UIRequests()` and observes Pi process exit. `HandleUserInput` returns after its RPC response, not after operation settlement, so the REPL can route further input during a run. Serialize coordinator state transitions through that event loop; do not add another event-channel reader.
+- Every reserved command and the shutdown sequence is a loop command: the caller performs the bounded RPC sequence and posts the outcome to the loop, and the loop alone writes operation state and emits the notice. A settle and a reserved-command outcome are processed in arrival order. The loop treats a clean Pi exit after a shutdown request as terminal-nil, never as an unexpected exit.
 - Read stdout continuously so Pi is never stalled; the client read goroutine always drains, and a full event channel is treated as a coordinator bug (protocol integrity failure), never as silent drop.
 - Add a `deliberate:` comment when an intentional simplification has a known limit; name the limit and the upgrade path.
 - Public-repository hygiene: no private harness names, paths, or credentials in code, tests, fixtures, or logs. The test extension and mock model are synthetic and public-safe.
@@ -348,6 +349,10 @@ On SIGTERM, the runtime SHALL run `clear_queue` → `abort` (when an operation i
 - GIVEN an active run with a delayed mock model response
 - WHEN SIGTERM arrives
 - THEN the ordered sequence runs, Pi exits within the deadline, and the process exits 0
+#### Scenario: Pi misses the shutdown deadline
+- GIVEN a Pi child that ignores the stdin close
+- WHEN the shutdown deadline expires
+- THEN the runtime kills the child, logs the kill, and still exits 0
 
 ### Requirement R18: REPL demo surface
 The REPL SHALL route stdin lines through the coordinator entry seam, print responses and notices to stdout, diagnostics to stderr, and exit 0 on clean EOF or SIGTERM. A prompt call returns after the RPC response so input remains available while the run is active.
@@ -567,10 +572,12 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 **Delivers:** Esc-parity abort: `clear_queue` before `abort`, with dropped-text reporting.
 **Blocked by:** Task 9
 **Traces to:** R12
-**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/abort_live_test.go`
+**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/abort_live_test.go`, `cmd/trygalle-repl/main.go` (extend), `cmd/trygalle-repl/main_test.go` (extend)
 
-- [ ] Route `/abort`: `ClearQueue` → `Abort` → `AbortReport` notice carrying the dropped steering and follow-up texts. If no operation is active, still run the sequence (mirrors Esc on an idle session) and report accordingly.
-- [ ] Unit-test the ordering (assert `ClearQueue` precedes `Abort`) and the dropped-texts payload with the fake client.
+- [ ] Route `/abort` as a loop command: the caller runs `ClearQueue` → `Abort` and posts the outcome, and the loop emits the `AbortReport` notice carrying the dropped steering and follow-up texts. If no operation is active, still run the sequence (mirrors Esc on an idle session) and report accordingly.
+- [ ] Pin the settle tie-break: when the settle arrives before the abort outcome, the operation reports its normal terminal outcome and the abort report says no operation was active; when the outcome arrives first, the abort report is the operation's single terminal outcome. Add a `deliberate:` comment naming this arrival-order rule.
+- [ ] Unit-test the ordering (assert `ClearQueue` precedes `Abort`) and the dropped-texts payload with the fake client, plus both settle/outcome arrival orders.
+- [ ] Extend `renderNotice` with an `AbortReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/abort` mid-run and assert the rendered notice.
 - [ ] Live-test (design contract tests 1 and 3): queue a steering message mid-run via `prompt` with `streamingBehavior: "steer"` and assert disposition `"queued"`; then pin that `abort` alone continues queued steering (assert the queued message runs); then assert `clear_queue` before `abort` leaves nothing queued.
 - [ ] Run `go test ./internal/...`; expect green.
 - [ ] Commit with `feat: add /abort with esc parity`.
@@ -579,10 +586,12 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 **Delivers:** Immediate new-session: supersede, queue clear, cancellation report.
 **Blocked by:** Task 9
 **Traces to:** R13
-**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/new_session_live_test.go`
+**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/new_session_live_test.go`, `cmd/trygalle-repl/main.go` (extend), `cmd/trygalle-repl/main_test.go` (extend)
 
-- [ ] Route `/new`: `ClearQueue` → `NewSession`; on success enter Superseded, emit `NewSessionReport` with dropped texts, log (not attribute) trailing events, return to Idle after reporting. On `cancelled: true`, report the cancellation and keep the current session.
-- [ ] Unit-test with the fake client: mid-run supersede (trailing `agent_end` logged, not attributed); cancelled switch; empty-queue dropped texts.
+- [ ] Route `/new` as a loop command: the caller runs `ClearQueue` → `NewSession` and posts the outcome; the loop enters Superseded, emits `NewSessionReport` with the dropped texts, returns to Idle after reporting, and logs trailing events without attributing them. On `cancelled: true`, the loop reports the cancellation and keeps the current session.
+- [ ] After a supersede, ignore run events (`agent_start`, `agent_end`, `agent_settled`) until the next `agent_start`, so a late settle from the superseded run can never be attributed to the next input.
+- [ ] Unit-test with the fake client: mid-run supersede (trailing `agent_end` logged, not attributed); cancelled switch; empty-queue dropped texts; a prompt issued right after `/new` followed by a late `agent_settled` still delivers the new run's text and emits no `EmptyResponse`.
+- [ ] Extend `renderNotice` with a `NewSessionReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/new` and assert the rendered notice.
 - [ ] Live-tests (design contract tests 4 and 5): mid-run `/new` — assert trailing events are observed and logged, and the steering queue is empty after the switch (a follow-up `clear_queue` returns empty lists); `MOCK_CANCEL_NEW_SESSION=1` — assert `cancelled: true`, session kept.
 - [ ] Run `go test ./internal/...`; expect green.
 - [ ] Commit with `feat: add /new with supersede semantics`.
@@ -594,7 +603,7 @@ Delivers dialog cancellation and the live compaction-window proof.
 **Delivers:** Immediate dialog cancellation and metadata-only logging of fire-and-forget requests.
 **Blocked by:** Tasks 7, 9
 **Traces to:** R14
-**Files:** `internal/runtime/coordinator.go` or `internal/runtime/ui.go`, `internal/runtime/ui_test.go`, `internal/runtime/ui_live_test.go`
+**Files:** `internal/runtime/coordinator.go` (extend the existing `handleUIRequest`), `internal/runtime/ui_test.go`, `internal/runtime/ui_live_test.go`
 
 - [ ] Subscribe to UI requests: dialog methods (`select`, `confirm`, `input`, `editor`) → `AnswerUIDialog` immediately; log the method only. Fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) → log method as metadata; no delivery.
 - [ ] Unit-test with the fake client: each dialog method answered with `cancelled: true`, no content logged (assert the log record's fields), fire-and-forget not answered.
@@ -606,9 +615,10 @@ Delivers dialog cancellation and the live compaction-window proof.
 **Delivers:** The live proof of the compaction fallback and steer-during-compaction delivery.
 **Blocked by:** Tasks 6, 7, 10
 **Traces to:** R6, R5 (mid-run dispositions)
-**Files:** `internal/runtime/compaction_live_test.go`
+**Files:** `internal/runtime/compaction_live_test.go`, `internal/harness/mockmodel.go` and `internal/harness/harness.go` (only if the context-overflow fallback is needed)
 
-- [ ] Live-test (design contract test 2): hold a run open with a delayed mock response; trigger compaction (send the `compact` command mid-run; if Pi 1.3.0 rejects mid-run `compact`, trigger it via context overflow — the mock reports usage exceeding the model's context window — and record the working trigger in the test).
+- [ ] Probe one trigger before writing the test: send `client.Send(ctx, rpc.Command{Type: "compact"})` mid-run (no `Compact` builder exists; `Command` and `Client.Send` are exported and `Command` has fixed fields). If Pi 1.3.0 rejects mid-run `compact`, add `usage` chunks to the mock SSE response and a `contextWindow` to the generated `models.json` model, then trigger compaction by context overflow. Record the working trigger in the test.
+- [ ] Live-test (design contract test 2): hold a run open with a delayed mock response and trigger compaction with the recorded mechanism.
 - [ ] During compaction: send a prompt; expect the documented error; send a bare `steer`; expect `"queued"`; after compaction ends, assert the steered message is delivered and the run settles.
 - [ ] Also assert the mid-run extension-command disposition: send `/mock-run` mid-run; expect `"handled"` and immediate execution (design contract test 1, third case).
 - [ ] Run `go test ./internal/runtime/ -run Compaction`; expect the runtime-package live test to run and pass.
@@ -626,7 +636,7 @@ Delivers the validation ladder, restart-resume behavior, and fatal exit wiring.
 - [ ] Implement startup: start Pi; `get_state` must succeed with a session identifier under `StartupValidationTimeout`; `get_commands` must succeed with a non-empty list; log the resumed session identifier and command category counts (no names).
 - [ ] On validation failure or process exit during validation: stop that attempt before starting another. Close stdin, wait under a bounded deadline, and call `Kill` if the child does not exit; then retry once with the same argv. Second consecutive failure follows the same cleanup sequence before starting with degraded args (no `--continue`), emits `SessionResumeFailed` (the loud notice), and logs the failure. Degraded-start failure also cleans up the child and returns a fatal error (the pod restart is the recovery). At most one Pi child may own the session directory at a time.
 - [ ] Unit-test with an injectable start function and scripted clients: one-strike recovery; verify the prior child has exited before the next start; two strikes → degraded start (assert the argv dropped `--continue`) and the notice; degraded failure → fatal error and cleanup; validation deadline expiry → treated as a failure strike; hung child → killed before retry.
-- [ ] Wire the REPL to run startup before reading input; fatal startup → exit 1 with a diagnostic.
+- [ ] Wire the REPL to run startup before reading input; fatal startup → exit 1 with a diagnostic. Extend `renderNotice` with a `SessionResumeFailed` case so the loud notice prints the failure cause on stdout.
 - [ ] Run `go test ./internal/...`; expect green.
 - [ ] Commit with `feat: add startup validation ladder with degraded resume`.
 
@@ -651,8 +661,9 @@ Delivers deterministic SIGTERM behavior, the docs, and the feature-level gate.
 **Traces to:** R17
 **Files:** `internal/runtime/shutdown.go`, `internal/runtime/shutdown_test.go`, `internal/runtime/shutdown_live_test.go`, `cmd/trygalle-repl/main.go` (signal wiring)
 
-- [ ] Implement `Shutdown(ctx)`: if Running → `ClearQueue`, `Abort`, wait for idle within the deadline; then `CloseStdin`; wait for exit within the deadline; best-effort `RestartNotice` when an operation was aborted (delivery never blocks shutdown); exit 0 either way; log each step.
-- [ ] Unit-test with the fake client: command ordering (`clear_queue` before `abort` before stdin close); deadline enforcement with a hanging fake (short deadline → returns without blocking); idle path (no abort commands sent).
+- [ ] Implement `Shutdown(ctx)` as a loop command: post the request so the loop sets its shutdown flag and returns whether an operation is Running. If Running, the caller runs `ClearQueue` → `Abort` under the deadline and treats the `Abort` response as the idle point. Emit the best-effort `RestartNotice` (delivery never blocks shutdown). Then `Coordinator.Close()`, `CloseStdin()`, and `client.Wait()` with the deadline and a `Kill()` fallback. Return nil (exit 0) either way and log each step. A clean exit after the shutdown request is never reported as a fatal coordinator error.
+- [ ] Unit-test with the fake client: command ordering (`clear_queue` before `abort` before stdin close); deadline enforcement with a hanging fake (short deadline → returns without blocking); idle path (no abort commands sent); clean exit after the shutdown request returns nil, not a fatal error.
+- [ ] Extend `renderNotice` with a `RestartNotice` case so the best-effort notice prints on stdout.
 - [ ] Live-test (design contract test 12): SIGTERM during a delayed mock run — assert the ordered sequence, Pi exit within the deadline, process exit 0; SIGTERM while idle — stdin close, bounded exit.
 - [ ] Wire the REPL: `signal.NotifyContext` (SIGTERM, SIGINT) → `Shutdown` → exit 0.
 - [ ] Run `go test ./internal/...`; expect green.
@@ -664,7 +675,7 @@ Delivers deterministic SIGTERM behavior, the docs, and the feature-level gate.
 **Traces to:** Durable-plan documentation requirement
 **Files:** `AGENTS.md`, `README.md`
 
-- [ ] Create `AGENTS.md`: build and test commands; live-test gate (`TRYGALLE_PI_BIN`, `TRYGALLE_PI_TESTS` semantics, and version check); the pinned Pi version (1.3.0) and the contract tests' role as the upgrade evidence gate; REPL usage; the constraint that Pi is the authority on session/run state (no competing implementations); the stdlib-only constraint. State that CI workflow setup is out of scope; a future workflow must install 1.3.0 and set `TRYGALLE_PI_TESTS=on`.
+- [ ] Create `AGENTS.md`: build and test commands; live-test gate (`TRYGALLE_PI_BIN`, `TRYGALLE_PI_TESTS` semantics, and version check); the pinned Pi version (1.3.0) and the contract tests' role as the upgrade evidence gate; REPL usage; the constraint that Pi is the authority on session/run state (no competing implementations); the stdlib-only constraint. Describe the existing `.github/workflows/ci.yml` split: the short job (`-race -short`) skips live tests by design, and the full job installs Pi 1.3.0 and sets `TRYGALLE_PI_TESTS=on`.
 - [ ] Extend `README.md` with a short Development section pointing to `AGENTS.md` and the test commands.
 - [ ] Commit with `docs: add agent and development instructions`.
 
