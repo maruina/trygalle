@@ -1,0 +1,40 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily full-suite run at 06:00 UTC.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - mode: short
+            go-test-args: "-race -short"
+          - mode: full
+            go-test-args: "-race"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # TRYGALLE_PI_TESTS=on makes the suite fail on a wrong pi install
+      # instead of silently skipping the live tests.
+      - name: Install pinned pi
+        if: matrix.mode == 'full'
+        run: npm install --global @earendil-works/pi-coding-agent@1.3.0
+      - name: Run tests
+        run: go test ${{ matrix.go-test-args }} ./...
+        env:
+          TRYGALLE_PI_TESTS: ${{ matrix.mode == 'full' && 'on' || 'auto' }}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
