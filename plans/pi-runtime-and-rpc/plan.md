@@ -31,6 +31,9 @@
 | `feature-worktree` | `prompt-required` | Slice 3 writes and commits need a feature worktree | Created `maruina-runtime-core` (branch `maruina/runtime-core`) from `origin/main` after the slice 2 squash merge |
 | `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` for Slice 3 (new Go files); no Kubernetes triggers; `reviewable-pr-workflow` and `git-machete` load for the PR itself |
 | `go-best-practices` | `skill-loader` | Go files created or modified | External `runtime_test` package with a scripted fake client; one event loop as sole consumer of the client channels; `-race` on all runtime tests; `go fix` modernization (`new(expr)`) applied before commits |
+| `feature-worktree` | `prompt-required` | Slice 4 planning writes and commits stay out of `main` | Recreated the plan worktree `maruina-pi-runtime-and-rpc-design` (branch `maruina/pi-runtime-and-rpc-design`) from the post-PR-#6 `origin/main` |
+| `learning-lookup` | `prompt-required` | Advisory guidance before planning decisions | Read `Datadog/Learnings.md` via `learning-sections` (terms: go test, coordinator, rpc, fake client); one distributed-systems section matched, reviewed as not material to `/status` routing |
+| `go-best-practices` | `skill-loader` | Go files affected by the Task 13 plan | Loop-owned notices preserved in the `/status` mechanism; fake-client scripting follows the existing `Prompt` script pattern; `-race` carried into the task's verification command |
 
 ---
 
@@ -539,12 +542,25 @@ Delivers `/status`, `/abort`, and `/new` with TUI-parity semantics.
 **Delivers:** Status routing and summary.
 **Blocked by:** Task 9
 **Traces to:** R11
-**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/status_live_test.go`
+**Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_result.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/status_live_test.go`, `cmd/trygalle-repl/main.go` (extend)
 
-- [ ] Route `/status` to `GetState`; emit a `Status` notice with `sessionId`, `isStreaming`, `isCompacting`, `pendingMessageCount`, `messageCount`, and the model id when present. No wording at this layer (Telegram design owns it).
-- [ ] Unit-test with the fake client, including the active-operation case (status must not disturb the running operation).
-- [ ] Live-test: during a delayed mock run, send `/status`; expect the summary with `isStreaming: true`.
-- [ ] Run `go test ./internal/...`; expect green.
+Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
+
+- All seams exist from Slices 1–3: `PiClient.GetState` in the client interface (`internal/runtime/client.go:42`), `NoticeStatus` and the `Notice.State *rpc.State` payload declared for Slice 4 (`internal/runtime/notices.go`), and the reserved-command stub logging "routing lands in slice 4" (`internal/runtime/coordinator.go`, `HandleUserInput`).
+- `rpc.State` (`internal/rpc/records.go:132`) already carries exactly the fields R11 names; no protocol change needed.
+- The fake client's `GetState` returns a fixed `State{SessionID: "s-1"}`; script it like `Prompt` so unit tests can pin streaming, model-present, and error states.
+- Notices are loop-owned: every existing `notifier.Notice` call runs inside the loop (`coordinator_result.go`, the event loop in `coordinator.go`). `/status` routes its outcome through a new `cmdStatus` coordinator command so the notice stays in the loop, without touching operation state — status is a read-only query, not an operation (R11 "must not disturb the running operation").
+- A `GetState` failure emits `NoticeRoutingFailure` with the error text and returns nil to the caller — the established prompt-failure pattern; no silent outcome (design "Message routing").
+- The REPL demo needs a `renderNotice` case for `NoticeStatus` (it currently falls through to the bare kind name); wording lives in the REPL demo like every other kind, with the Telegram design owning final wording (follow-up #2).
+- Advisory learning lookup: one distributed-systems section (control-plane/data-plane decoupling) reviewed; not material to `/status` routing.
+
+- [ ] Script the fake client's `GetState` (state, err) like `Prompt` so tests can pin varied states.
+- [ ] Add the `cmdStatus` coordinator command: the loop handles it by emitting `Notice{Kind: NoticeStatus, State: &state}` on success, or logging and emitting `Notice{Kind: NoticeRoutingFailure, Text: err.Error()}` on failure; both acknowledge nil.
+- [ ] Route `/status` in `HandleUserInput`'s reserved branch: `c.client.GetState(ctx)` on the caller goroutine, hand the outcome to the loop via `cmdStatus`. No begin/result handshake; no operation state touched.
+- [ ] Unit-test with the fake client: idle `/status` → `Status` notice with the scripted state; mid-run `/status` → `get_state` recorded, no `prompt`/`steer` call, the active run still settles; `GetState` error → `RoutingFailure` notice, no `Status` notice.
+- [ ] Live-test (`internal/runtime/status_live_test.go`): coordinator over the real pi with a delayed mock model; prompt mid-run, then `/status`; expect the `Status` notice with `IsStreaming: true` and a session id.
+- [ ] Extend `renderNotice` with a `NoticeStatus` case; REPL smoke check that `/status` prints the summary.
+- [ ] Run `go test -race ./internal/...`; expect green.
 - [ ] Commit with `feat: add /status routing`.
 
 ### Task 14: `/abort`
