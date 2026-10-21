@@ -130,6 +130,9 @@ func versionMismatch(check piVersionCheck) (resolveResult, error) {
 // resolveGate reports.
 func Pi(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("live test spawns the pinned pi binary; run the full suite without -short")
+	}
 	res, err := resolveGate()
 	if err != nil {
 		t.Fatal(err)
