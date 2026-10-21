@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeHandler records every routed input and fails on demand, simulating an
@@ -15,7 +18,11 @@ type fakeHandler struct {
 	inputs  []string
 	failOn  string // route returns an error for this text
 	failErr error
+	done    chan struct{}
 }
+
+func (h *fakeHandler) Done() <-chan struct{} { return h.done }
+func (h *fakeHandler) Wait() error           { return h.failErr }
 
 func (h *fakeHandler) HandleUserInput(ctx context.Context, text string) error {
 	h.mu.Lock()
@@ -35,7 +42,7 @@ func (h *fakeHandler) routed() []string {
 
 func TestRunRoutesInputsBeforeSettlementAndExitsOnEOF(t *testing.T) {
 	h := &fakeHandler{}
-	stdin := strings.NewReader("first prompt\nsecond prompt\n/status\n")
+	stdin := io.NopCloser(strings.NewReader("first prompt\nsecond prompt\n/status\n"))
 
 	// The first prompt "stays active": the fake settles nothing, while run()
 	// keeps accepting lines until EOF.
@@ -56,7 +63,7 @@ func TestRunRoutesInputsBeforeSettlementAndExitsOnEOF(t *testing.T) {
 
 func TestRunSkipsBlankLines(t *testing.T) {
 	h := &fakeHandler{}
-	stdin := strings.NewReader("\n  \nhello\n\t\n")
+	stdin := io.NopCloser(strings.NewReader("\n  \nhello\n\t\n"))
 	if err := run(context.Background(), stdin, nil, h); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -68,7 +75,7 @@ func TestRunSkipsBlankLines(t *testing.T) {
 func TestRunReturnsHandlerError(t *testing.T) {
 	wantErr := errors.New("coordinator fatal")
 	h := &fakeHandler{failOn: "second", failErr: wantErr}
-	stdin := strings.NewReader("first\nsecond\nthird\n")
+	stdin := io.NopCloser(strings.NewReader("first\nsecond\nthird\n"))
 	if err := run(context.Background(), stdin, nil, h); !errors.Is(err, wantErr) {
 		t.Errorf("run error = %v, want %v", err, wantErr)
 	}
@@ -81,7 +88,7 @@ func TestRunReturnsHandlerError(t *testing.T) {
 
 func TestCommandHelpExitsCleanly(t *testing.T) {
 	var stdout, stderr strings.Builder
-	err := command([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
+	err := command([]string{"--help"}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("command(--help) error = %v, want a clean exit", err)
 	}
@@ -95,7 +102,7 @@ func TestCommandHelpExitsCleanly(t *testing.T) {
 
 func TestCommandRequiresSessionDir(t *testing.T) {
 	var stdout, stderr strings.Builder
-	err := command([]string{}, strings.NewReader(""), &stdout, &stderr)
+	err := command([]string{}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 	if !errors.Is(err, errUsage) {
 		t.Fatalf("command() error = %v, want errUsage", err)
 	}
@@ -108,13 +115,55 @@ func TestCommandRejectsNonPositiveHeartbeat(t *testing.T) {
 	for _, value := range []string{"0", "-1s"} {
 		var stdout, stderr strings.Builder
 		argv := []string{"--session-dir", "/tmp/s", "--heartbeat-interval", value}
-		err := command(argv, strings.NewReader(""), &stdout, &stderr)
+		err := command(argv, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 		if !errors.Is(err, errUsage) {
 			t.Fatalf("--heartbeat-interval %s error = %v, want errUsage", value, err)
 		}
 		if !strings.Contains(stderr.String(), "--heartbeat-interval must be greater than zero") {
 			t.Errorf("--heartbeat-interval %s missing diagnostic: %q", value, stderr.String())
 		}
+	}
+}
+
+func TestRunDoesNotCloseProcessStdin(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = reader
+	defer func() {
+		os.Stdin = originalStdin
+		_ = reader.Close()
+		_ = writer.Close()
+	}()
+
+	h := &fakeHandler{done: make(chan struct{})}
+	close(h.done)
+	if err := run(context.Background(), reader, nil, h); err != nil {
+		t.Fatalf("run = %v, want nil", err)
+	}
+	if _, err := reader.Stat(); err != nil {
+		t.Fatalf("process stdin was closed: %v", err)
+	}
+}
+
+func TestRunReturnsFatalWhileStdinOpen(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	want := errors.New("pi failed")
+	h := &fakeHandler{done: make(chan struct{}), failErr: want}
+	result := make(chan error, 1)
+	go func() { result <- run(context.Background(), reader, nil, h) }()
+	close(h.done)
+	select {
+	case err := <-result:
+		if !errors.Is(err, want) {
+			t.Fatalf("run = %v, want %v", err, want)
+		}
+	case <-time.After(time.Second):
+		reader.Close()
+		t.Fatal("run waited for stdin after failure")
 	}
 }
 
