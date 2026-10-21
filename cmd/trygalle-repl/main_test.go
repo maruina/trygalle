@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,29 @@ func TestCommandRejectsNonPositiveHeartbeat(t *testing.T) {
 		if !strings.Contains(stderr.String(), "--heartbeat-interval must be greater than zero") {
 			t.Errorf("--heartbeat-interval %s missing diagnostic: %q", value, stderr.String())
 		}
+	}
+}
+
+func TestRunDoesNotCloseProcessStdin(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = reader
+	defer func() {
+		os.Stdin = originalStdin
+		_ = reader.Close()
+		_ = writer.Close()
+	}()
+
+	h := &fakeHandler{done: make(chan struct{})}
+	close(h.done)
+	if err := run(context.Background(), reader, nil, h); err != nil {
+		t.Fatalf("run = %v, want nil", err)
+	}
+	if _, err := reader.Stat(); err != nil {
+		t.Fatalf("process stdin was closed: %v", err)
 	}
 }
 

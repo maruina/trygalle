@@ -246,20 +246,38 @@ func (c *Client) forget(id string) {
 }
 
 func (c *Client) write(ctx context.Context, v any) error {
+	if err := c.acquireWrite(ctx); err != nil {
+		return err
+	}
+	defer func() { <-c.writeGate }()
+	if err := c.checkWrite(ctx); err != nil {
+		return err
+	}
+	return c.writeRecord(ctx, v)
+}
+
+func (c *Client) acquireWrite(ctx context.Context) error {
 	select {
 	case c.writeGate <- struct{}{}:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.died:
 		return pendingErr(c.Wait())
 	}
-	defer func() { <-c.writeGate }()
+}
+
+func (c *Client) checkWrite(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if c.stdinClosed.Load() {
 		return errStdinClosed
 	}
+	return nil
+}
+
+func (c *Client) writeRecord(ctx context.Context, v any) error {
 	// Cancellation during a write may leave a partial record. Terminate the
 	// transport instead of allowing another command onto an uncertain stream.
 	cancelled := make(chan struct{})

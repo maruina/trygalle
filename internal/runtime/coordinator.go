@@ -135,14 +135,6 @@ func (c *Coordinator) Close() {
 }
 
 // Done closes when the coordinator stops.
-func (c *Coordinator) Done() <-chan struct{} { return c.done }
-
-// Wait returns the terminal error after the coordinator stops.
-func (c *Coordinator) Wait() error {
-	<-c.done
-	return c.terminalError()
-}
-
 // HandleUserInput routes one user input. Reserved commands are recognized but
 // routed in Slice 4; everything else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
@@ -296,84 +288,6 @@ func (c *Coordinator) handleBegin(cmd coordCommand) {
 		return
 	}
 	c.pending = cmd.op
-	cmd.ack <- nil
-}
-
-func (c *Coordinator) handleResult(cmd coordCommand) {
-	if c.pending == nil || c.pending != cmd.op {
-		cmd.ack <- errNoPendingInput
-		return
-	}
-	pending := c.pending
-	defer func() { c.pending = nil }()
-	if cmd.err != nil {
-		// A submission that failed to reach Pi is a routing failure; the
-		// input is never dropped silently (design "Message routing").
-		c.log.Error("prompt failed", "error", cmd.err)
-		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
-		cmd.ack <- nil
-		return
-	}
-	switch cmd.disposition {
-	case DispositionStarted:
-		started := c.startOperation(pending)
-		if !started {
-			cmd.ack <- nil
-			return
-		}
-		if pending.settled {
-			// Fast completion: the run settled before the prompt response
-			// was processed.
-			c.settleCurrentOperation()
-		}
-		cmd.ack <- nil
-	case DispositionQueued:
-		// The input steered into the active run; acceptance only. The run's
-		// operation completes at agent_settled, and the steered text is part
-		// of that run's single final response.
-		c.notifier.Notice(context.Background(), Notice{Kind: NoticeSteerAcknowledged})
-		cmd.ack <- nil
-	case DispositionHandled:
-		c.handleHandled(pending, cmd)
-	default:
-		// A disposition outside the pinned set means protocol drift; the
-		// input is never dropped silently (design "Message routing").
-		c.log.Error("unexpected disposition", "disposition", cmd.disposition)
-		c.notifier.Notice(context.Background(), Notice{
-			Kind: NoticeRoutingFailure,
-			Text: fmt.Sprintf("unexpected disposition %q", cmd.disposition),
-		})
-		cmd.ack <- fmt.Errorf("unexpected disposition %q", cmd.disposition)
-	}
-}
-
-// handleHandled attributes a handled input (design "Operation state machine"):
-// an extension handler consumed the prompt, and through pi.sendMessage it may
-// have synchronously started its own run. For that pinned Pi path, agent_start
-// for the run arrives before the handled response on the wire.
-func (c *Coordinator) handleHandled(pending *operation, cmd coordCommand) {
-	c.drainEvents()
-	switch {
-	case c.op != nil:
-		// An extension command handled mid-run: it executed, no run started
-		// for it, and the active run continues, so the input gets its own
-		// outcome instead of silence. deliberate: the wording is a placeholder
-		// until the Telegram design owns notice text.
-		c.log.Info("handled input while an operation is running")
-		c.notifier.Notice(context.Background(), Notice{Kind: NoticeExtensionHandled})
-	case pending.hasRun:
-		// The extension run's agent_start was observed (or already drained)
-		// before the response: track the run to its own agent_settled.
-		c.startOperation(pending)
-		if pending.settled {
-			c.settleCurrentOperation()
-		}
-	default:
-		// Stale-text guard: no run belongs to this input, so the last
-		// assistant text could only be the previous run's. Complete the
-		// input immediately without querying Pi.
-		c.notifier.Notice(context.Background(), Notice{Kind: NoticeEmptyResponse})
-	}
 	cmd.ack <- nil
 }
 

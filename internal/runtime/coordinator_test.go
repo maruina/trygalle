@@ -235,6 +235,20 @@ func startRunningOperation(t *testing.T, f *fakeClient, c *runtime.Coordinator) 
 	f.events <- rpc.Event{Type: "agent_start"}
 }
 
+func TestWait(t *testing.T) {
+	c := newTestCoordinator(t, newFakeClient(), newRecordingNotifier())
+	done := c.Done()
+	c.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("coordinator did not stop")
+	}
+	if err := c.Wait(); err == nil {
+		t.Fatal("Wait = nil, want the stopped condition")
+	}
+}
+
 func TestSettledRunWithTextResponds(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()

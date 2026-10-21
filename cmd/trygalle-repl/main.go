@@ -24,7 +24,10 @@ import (
 // maxLineSize bounds one stdin line. deliberate: the framing limit rule
 // applies to the protocol path; stdin lines belong to the demo surface, and
 // 1 MiB comfortably exceeds any interactive prompt.
-const maxLineSize = 1 << 20
+const (
+	maxLineSize          = 1 << 20
+	scannerInitialBuffer = 64 * 1024
+)
 
 // inputHandler is the part of the runtime coordinator the REPL loop needs.
 // The real *runtime.Coordinator satisfies it.
@@ -151,31 +154,49 @@ func buildArgs(noContinue bool, sessionDir string) []string {
 // HandleUserInput returns after the RPC response, this loop accepts further
 // lines while a run is active.
 func run(ctx context.Context, stdin io.ReadCloser, stdout io.Writer, handler inputHandler) error {
-	// The caller transfers stdin ownership; Close must interrupt a pending
-	// Read so the single reader goroutine can always be joined.
-	lines := make(chan string)
-	readerDone := make(chan struct{})
 	stop := make(chan struct{})
-	var readErr error
+	lines, readErr, readerDone := scanInput(stdin, stop)
+	defer stopInputReader(stop, stdin, readerDone)
+	return routeInput(ctx, lines, readErr, handler)
+}
+
+func scanInput(stdin io.Reader, stop <-chan struct{}) (<-chan string, <-chan error, <-chan struct{}) {
+	lines := make(chan string)
+	readErr := make(chan error, 1)
+	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer close(lines)
 		scanner := bufio.NewScanner(stdin)
-		scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+		scanner.Buffer(make([]byte, 0, scannerInitialBuffer), maxLineSize)
 		for scanner.Scan() {
 			select {
 			case lines <- scanner.Text():
 			case <-stop:
+				readErr <- nil
 				return
 			}
 		}
-		readErr = scanner.Err()
+		readErr <- scanner.Err()
 	}()
-	defer func() {
-		close(stop)
-		_ = stdin.Close()
-		<-readerDone
-	}()
+	return lines, readErr, readerDone
+}
+
+func stopInputReader(stop chan struct{}, stdin io.ReadCloser, readerDone <-chan struct{}) {
+	close(stop)
+	if inputIsProcessStdin(stdin) {
+		return
+	}
+	_ = stdin.Close()
+	<-readerDone
+}
+
+func inputIsProcessStdin(stdin io.ReadCloser) bool {
+	file, ok := stdin.(*os.File)
+	return ok && file == os.Stdin
+}
+
+func routeInput(ctx context.Context, lines <-chan string, readErr <-chan error, handler inputHandler) error {
 	for {
 		select {
 		case <-handler.Done():
@@ -184,26 +205,33 @@ func run(ctx context.Context, stdin io.ReadCloser, stdout io.Writer, handler inp
 			return ctx.Err()
 		case line, ok := <-lines:
 			if !ok {
-				<-readerDone
-				select {
-				case <-handler.Done():
-					return handler.Wait()
-				default:
-				}
-				if readErr != nil {
-					return fmt.Errorf("read stdin: %w", readErr)
-				}
-				return nil
+				return finishInput(handler, readErr)
 			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if err := handler.HandleUserInput(ctx, line); err != nil {
+			if err := handleInputLine(ctx, handler, line); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func finishInput(handler inputHandler, readErr <-chan error) error {
+	select {
+	case <-handler.Done():
+		return handler.Wait()
+	default:
+	}
+	if err := <-readErr; err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	return nil
+}
+
+func handleInputLine(ctx context.Context, handler inputHandler, line string) error {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+	return handler.HandleUserInput(ctx, line)
 }
 
 // waitPiExit waits for pi's orderly exit up to the shutdown deadline, killing
