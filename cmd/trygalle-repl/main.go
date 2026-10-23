@@ -1,7 +1,7 @@
 // Command trygalle-repl is the dev-only demo surface for the trygalle
 // coordinator: it routes stdin lines through the coordinator to one long-lived
 // pi rpc subprocess. It is not the production container main process; the
-// reserved commands (/status, /abort, /new) route in slice 4, and SIGINT and
+// reserved commands /abort and /new route later in slice 4 (Tasks 14-15), and SIGINT and
 // SIGTERM wiring lands with the shutdown task.
 package main
 
@@ -59,7 +59,7 @@ Example:
   trygalle-repl --session-dir /tmp/trygalle-demo
 
 Notes:
-  - Reserved commands /status, /abort, and /new land in slice 4.
+  - Reserved commands /abort and /new land later in slice 4 (Tasks 14-15).
   - SIGINT and SIGTERM handling lands with the shutdown task; EOF (Ctrl-D)
     exits cleanly.
 `
@@ -272,6 +272,18 @@ func (n stdoutNotifier) Notice(ctx context.Context, notice runtime.Notice) {
 func renderNotice(n runtime.Notice) string {
 	text := ""
 	switch n.Kind {
+	case runtime.NoticeStatus:
+		if n.State == nil {
+			return "status: no state reported"
+		}
+		// State carries session metadata only; no prompt or tool content.
+		text = fmt.Sprintf("session %s; streaming=%t compacting=%t pending=%d messages=%d",
+			n.State.SessionID, n.State.IsStreaming, n.State.IsCompacting,
+			n.State.PendingMessageCount, n.State.MessageCount)
+		if n.State.Model != nil {
+			text += "; model " + n.State.Model.ID
+		}
+		return text
 	case runtime.NoticeHeartbeat:
 		if n.LastActivity.Type == "" {
 			return fmt.Sprintf("running for %s; no pi activity yet; send /abort to stop", n.Elapsed)

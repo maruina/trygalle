@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"slices"
@@ -13,6 +14,9 @@ import (
 	"github.com/maruina/trygalle/internal/rpc"
 	"github.com/maruina/trygalle/internal/runtime"
 )
+
+// errFakeGetState scripts a get_state failure for the status error path.
+var errFakeGetState = errors.New("fake get_state failure")
 
 // fakeClient is a scripted PiClient: the test sets the canned results, and the
 // fake records the commands the coordinator routes. It implements the record
@@ -31,6 +35,8 @@ type fakeClient struct {
 	steerErr         error
 	text             *string
 	textErr          error
+	state            rpc.State
+	stateErr         error
 
 	// events carries the state events the test plays. An event pushed before
 	// the canned prompt response returns matches the wire-order guarantee the
@@ -54,6 +60,7 @@ func newFakeClient() *fakeClient {
 		events: make(chan rpc.Event, 64),
 		ui:     make(chan rpc.UIRequest, 16),
 		died:   make(chan struct{}),
+		state:  rpc.State{SessionID: "s-1"},
 	}
 }
 
@@ -102,7 +109,7 @@ func (f *fakeClient) Steer(ctx context.Context, message string) (rpc.Disposition
 
 func (f *fakeClient) GetState(ctx context.Context) (rpc.State, error) {
 	f.record("get_state")
-	return rpc.State{SessionID: "s-1"}, nil
+	return f.state, f.stateErr
 }
 
 func (f *fakeClient) GetCommands(ctx context.Context) ([]rpc.CommandInfo, error) {
@@ -581,7 +588,13 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 		t.Fatalf("HandleUserInput while active: %v", err)
 	}
 	n.waitForNotice(t, runtime.NoticeSteerAcknowledged)
-	for _, cmd := range []string{"/status", "/abort", "/new"} {
+	// /status reports without disturbing the run; /abort and /new still
+	// stub out to their Slice 4 tasks.
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("/status while active: %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeStatus)
+	for _, cmd := range []string{"/abort", "/new"} {
 		if err := c.HandleUserInput(context.Background(), cmd); err != nil {
 			t.Errorf("%s while active: %v", cmd, err)
 		}
@@ -657,5 +670,89 @@ func TestReservedCommandsNeverReachPrompt(t *testing.T) {
 	}
 	if calls := f.getCalls(); slices.Contains(calls, "prompt") {
 		t.Errorf("reserved commands reached prompt; calls = %v", calls)
+	}
+}
+
+func TestStatusIdleReportsScriptedState(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.state = rpc.State{
+		SessionID:           "sess-42",
+		IsStreaming:         false,
+		MessageCount:        3,
+		PendingMessageCount: 0,
+		Model:               &rpc.Model{ID: "mock-model"},
+	}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("HandleUserInput(/status): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeStatus)
+	if notice.State == nil {
+		t.Fatal("Status notice carries no state")
+	}
+	if notice.State.SessionID != "sess-42" || notice.State.IsStreaming {
+		t.Errorf("Status state = %+v, want sess-42 idle", notice.State)
+	}
+	if notice.State.Model == nil || notice.State.Model.ID != "mock-model" {
+		t.Errorf("Status model = %+v, want mock-model", notice.State.Model)
+	}
+	if calls := f.getCalls(); !slices.Equal(calls, []string{"get_state"}) {
+		t.Errorf("calls = %v, want [get_state] and no prompt/steer", calls)
+	}
+}
+
+func TestStatusMidRunLeavesOperationUndisturbed(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.state = rpc.State{SessionID: "sess-1", IsStreaming: true}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+	before := len(f.getCalls())
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("/status while active: %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeStatus)
+	if notice.State == nil || !notice.State.IsStreaming {
+		t.Errorf("Status state = %+v, want streaming sess-1", notice.State)
+	}
+	for _, call := range f.getCalls()[before:] {
+		if call == "prompt" || call == "steer" {
+			t.Errorf("status query submitted %q; calls = %v", call, f.getCalls())
+		}
+	}
+
+	// The active run still settles into its own response afterwards.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+func TestStatusErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.stateErr = errFakeGetState
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("HandleUserInput(/status): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if notice.Text == "" {
+		t.Error("RoutingFailure must carry the get_state failure cause")
+	}
+	select {
+	case extra := <-n.notices:
+		t.Errorf("unexpected extra notice %q after RoutingFailure", extra.Kind)
+	case extra := <-n.responses:
+		t.Errorf("unexpected response %q after failed status", extra)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

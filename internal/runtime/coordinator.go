@@ -66,12 +66,14 @@ type cmdKind int
 const (
 	cmdBegin  cmdKind = iota // an input is about to be submitted to Pi
 	cmdResult                // the RPC outcome of a submission
+	cmdStatus                // a /status query outcome; read-only, no operation state
 )
 
 type coordCommand struct {
 	kind        cmdKind
 	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
+	status      State // the /status query outcome for cmdStatus
 	err         error
 	ack         chan error
 }
@@ -135,15 +137,18 @@ func (c *Coordinator) Close() {
 }
 
 // Done closes when the coordinator stops.
-// HandleUserInput routes one user input. Reserved commands are recognized but
-// routed in Slice 4; everything else goes to prompt with streamingBehavior
+// HandleUserInput routes one user input. /status runs a read-only get_state
+// query; /abort and /new route later in Slice 4 (Tasks 14-15); everything
+// else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
 // because Pi is the authority on run state. The method returns after the RPC
 // response, or with the coordinator's fatal error once Pi is unusable.
 func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
+	if text == "/status" {
+		return c.handleStatusRequest(ctx)
+	}
 	if isReservedCommand(text) {
-		// Reserved commands never reach prompt{steer}. Their routing
-		// (/status, /abort, /new) lands in Slice 4.
+		// /abort and /new land later in Slice 4 (Tasks 14-15).
 		c.log.Info("reserved command; routing lands in slice 4", "kind", text)
 		return nil
 	}
@@ -218,6 +223,17 @@ func (c *Coordinator) terminalError() error {
 	return errCoordinatorClosed
 }
 
+// handleStatusRequest routes /status: a read-only get_state query whose
+// outcome the loop reports as a Status notice. It never touches operation
+// state and uses no begin/result handshake, so it routes while a run is
+// active without disturbing it (R11).
+func (c *Coordinator) handleStatusRequest(ctx context.Context) error {
+	state, err := c.client.GetState(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdStatus, status: state, err: err})
+}
+
 // isReservedCommand reports whether text is one of the exact-match reserved
 // command names (plan "REPL entry seam").
 func isReservedCommand(text string) bool {
@@ -249,6 +265,8 @@ func (c *Coordinator) loop() {
 				c.handleBegin(cmd)
 			case cmdResult:
 				c.handleResult(cmd)
+			case cmdStatus:
+				c.handleStatus(cmd)
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)

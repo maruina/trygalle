@@ -36,6 +36,21 @@ func (c *Coordinator) handlePromptFailure(cmd coordCommand) {
 	cmd.ack <- nil
 }
 
+// handleStatus reports one /status query outcome as a loop-owned notice. A
+// failed get_state is a routing failure with the failure cause, mirroring
+// the prompt-failure pattern; neither path is silent. The query never touches
+// operation state: status observes the run without disturbing it (R11).
+func (c *Coordinator) handleStatus(cmd coordCommand) {
+	if cmd.err != nil {
+		c.log.Error("get_state failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+	} else {
+		state := cmd.status
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeStatus, State: &state})
+	}
+	cmd.ack <- nil
+}
+
 func (c *Coordinator) handleStarted(pending *operation, cmd coordCommand) {
 	if !c.startOperation(pending) {
 		cmd.ack <- nil
