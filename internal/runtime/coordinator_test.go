@@ -21,6 +21,9 @@ var errFakeGetState = errors.New("fake get_state failure")
 // errFakeAbort scripts an abort-sequence failure.
 var errFakeAbort = errors.New("fake abort failure")
 
+// errFakeNewSession scripts a new-session-sequence failure.
+var errFakeNewSession = errors.New("fake new_session failure")
+
 // fakeClient is a scripted PiClient: the test sets the canned results, and the
 // fake records the commands the coordinator routes. It implements the record
 // seams; it does not reimplement Pi behavior.
@@ -32,17 +35,19 @@ type fakeClient struct {
 	promptScript []scriptedPrompt
 	// onPrompt and onSteer run before the canned result returns, letting a
 	// test play the events Pi emits while producing the response.
-	onPrompt         func()
-	onSteer          func()
-	steerDisposition rpc.Disposition
-	steerErr         error
-	text             *string
-	textErr          error
-	state            rpc.State
-	stateErr         error
-	queue            rpc.QueueContents
-	clearQueueErr    error
-	abortErr         error
+	onPrompt            func()
+	onSteer             func()
+	steerDisposition    rpc.Disposition
+	steerErr            error
+	text                *string
+	textErr             error
+	state               rpc.State
+	stateErr            error
+	queue               rpc.QueueContents
+	clearQueueErr       error
+	abortErr            error
+	newSessionCancelled bool
+	newSessionErr       error
 
 	// events carries the state events the test plays. An event pushed before
 	// the canned prompt response returns matches the wire-order guarantee the
@@ -135,7 +140,7 @@ func (f *fakeClient) ClearQueue(ctx context.Context) (rpc.QueueContents, error) 
 
 func (f *fakeClient) NewSession(ctx context.Context) (bool, error) {
 	f.record("new_session")
-	return false, nil
+	return f.newSessionCancelled, f.newSessionErr
 }
 
 func (f *fakeClient) GetLastAssistantText(ctx context.Context) (*string, error) {
@@ -585,8 +590,8 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 	defer c.Close()
 	startRunningOperation(t, f, c)
 
-	// While the run is active, a second prompt steers and the reserved names
-	// route, without spawning a second event consumer.
+	// While the run is active, a second prompt steers and /status routes,
+	// without spawning a second event consumer.
 	f.promptScript = []scriptedPrompt{
 		{disposition: rpc.DispositionQueued},
 	}
@@ -601,9 +606,8 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 		t.Fatalf("/status while active: %v", err)
 	}
 	n.waitForNotice(t, runtime.NoticeStatus)
-	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
-		t.Errorf("/new while active: %v", err)
-	}
+	// /abort now terminates the run and /new supersedes it (both covered by
+	// their own tests), so neither belongs in this settle-normally flow.
 
 	// The first run still settles normally afterwards.
 	f.events <- rpc.Event{Type: "agent_settled"}
@@ -874,6 +878,152 @@ func TestAbortSequenceErrorEmitsRoutingFailure(t *testing.T) {
 	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
 	if !strings.Contains(notice.Text, "fake abort failure") {
 		t.Errorf("RoutingFailure text = %q, want the abort failure cause", notice.Text)
+	}
+
+	// The failed sequence leaves the operation running: its settle is still
+	// attributed normally.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+func TestNewSessionMidRunSupersedes(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if notice.Text != "" {
+		t.Errorf("switched NewSessionReport text = %q, want empty (no cancellation)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) ||
+		!slices.Equal(notice.Dropped.FollowUp, []string{"follow"}) {
+		t.Errorf("NewSessionReport dropped = %+v, want the cleared queue", notice.Dropped)
+	}
+	calls := f.getCalls()
+	clearIdx, newIdx := slices.Index(calls, "clear_queue"), slices.Index(calls, "new_session")
+	if clearIdx < 0 || newIdx < 0 || clearIdx > newIdx {
+		t.Errorf("new-session sequence calls = %v, want clear_queue before new_session", calls)
+	}
+
+	// Trailing events from the superseded run are logged, never attributed:
+	// a failed assistant message in a trailing agent_end produces no
+	// FailedRun, and the trailing settle produces no outcome.
+	f.events <- rpc.Event{
+		Type: "agent_end",
+		Messages: []rpc.Message{
+			{Role: "assistant", StopReason: "error", ErrorMessage: "old run died"},
+		},
+	}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q from trailing superseded events", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q from trailing superseded events", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestNewSessionCancelledKeepsSession(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.newSessionCancelled = true
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if notice.Text != "session switch cancelled" {
+		t.Errorf("cancelled NewSessionReport text = %q, want the cancellation marker", notice.Text)
+	}
+
+	// The current session (and its active run) continues: the run still
+	// settles into its own response afterwards.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+func TestNewSessionEmptyQueue(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if len(notice.Dropped.Steering) != 0 || len(notice.Dropped.FollowUp) != 0 {
+		t.Errorf("NewSessionReport dropped = %+v, want empty", notice.Dropped)
+	}
+}
+
+func TestPromptAfterNewIgnoresLateSettle(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("new run text")
+	f.promptDisposition = rpc.DispositionStarted
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeNewSessionReport)
+
+	// A prompt issued right after /new starts a new operation while the
+	// supersede suppression is still armed (no agent_start yet).
+	if err := c.HandleUserInput(context.Background(), "new input"); err != nil {
+		t.Fatalf("HandleUserInput after /new: %v", err)
+	}
+
+	// A late settle from the superseded run arrives before the new run
+	// starts: it is dropped, so the new run keeps its attribution.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Fatalf("late superseded settle produced response %q", text)
+	case extra := <-n.notices:
+		t.Fatalf("late superseded settle produced notice %q", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "new run text" {
+		t.Errorf("response = %q, want %q", got, "new run text")
+	}
+}
+
+func TestNewSessionSequenceErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.newSessionErr = errFakeNewSession
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if !strings.Contains(notice.Text, "fake new_session failure") {
+		t.Errorf("RoutingFailure text = %q, want the new_session failure cause", notice.Text)
 	}
 
 	// The failed sequence leaves the operation running: its settle is still

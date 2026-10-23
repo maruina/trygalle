@@ -44,14 +44,14 @@ func (h *fakeHandler) routed() []string {
 
 func TestRunRoutesInputsBeforeSettlementAndExitsOnEOF(t *testing.T) {
 	h := &fakeHandler{}
-	stdin := io.NopCloser(strings.NewReader("first prompt\nsecond prompt\n/status\n/abort\n"))
+	stdin := io.NopCloser(strings.NewReader("first prompt\nsecond prompt\n/status\n/abort\n/new\n"))
 
 	// The first prompt "stays active": the fake settles nothing, while run()
 	// keeps accepting lines until EOF.
 	if err := run(context.Background(), stdin, nil, h); err != nil {
 		t.Fatalf("run with clean EOF: %v", err)
 	}
-	want := []string{"first prompt", "second prompt", "/status", "/abort"}
+	want := []string{"first prompt", "second prompt", "/status", "/abort", "/new"}
 	got := h.routed()
 	if len(got) != len(want) {
 		t.Fatalf("routed = %v, want %v", got, want)
@@ -195,6 +195,23 @@ func TestRenderNoticeStatus(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("renderNotice(Status) = %q, want it to contain %q", got, want)
 		}
+	}
+}
+
+func TestRenderNoticeNewSessionReport(t *testing.T) {
+	got := renderNotice(runtime.Notice{
+		Kind:    runtime.NoticeNewSessionReport,
+		Dropped: runtime.QueueContents{Steering: []string{"steered"}},
+	})
+	for _, want := range []string{"new session", `"steered"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderNotice(NewSessionReport) = %q, want it to contain %q", got, want)
+		}
+	}
+
+	cancelled := renderNotice(runtime.Notice{Kind: runtime.NoticeNewSessionReport, Text: "session switch cancelled"})
+	if !strings.Contains(cancelled, "session switch cancelled") {
+		t.Errorf("renderNotice(cancelled NewSessionReport) = %q, want the cancellation marker", cancelled)
 	}
 }
 

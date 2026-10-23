@@ -1,8 +1,7 @@
 // Command trygalle-repl is the dev-only demo surface for the trygalle
 // coordinator: it routes stdin lines through the coordinator to one long-lived
-// pi rpc subprocess. It is not the production container main process; the
-// reserved commands /abort and /new route later in slice 4 (Tasks 14-15), and SIGINT and
-// SIGTERM wiring lands with the shutdown task.
+// pi rpc subprocess. It is not the production container main process; SIGINT
+// and SIGTERM wiring lands with the shutdown task.
 package main
 
 import (
@@ -59,7 +58,7 @@ Example:
   trygalle-repl --session-dir /tmp/trygalle-demo
 
 Notes:
-  - Reserved commands /abort and /new land later in slice 4 (Tasks 14-15).
+  - SIGINT and SIGTERM handling lands with the shutdown task.
   - SIGINT and SIGTERM handling lands with the shutdown task; EOF (Ctrl-D)
     exits cleanly.
 `
@@ -306,6 +305,19 @@ func renderNotice(n runtime.Notice) string {
 			text += "; " + n.Text
 		}
 		// The dropped queue texts prove nothing survives the abort (R12).
+		if len(n.Dropped.Steering) > 0 {
+			text += fmt.Sprintf("; dropped steering: %q", n.Dropped.Steering)
+		}
+		if len(n.Dropped.FollowUp) > 0 {
+			text += fmt.Sprintf("; dropped follow-up: %q", n.Dropped.FollowUp)
+		}
+		return text
+	case runtime.NoticeNewSessionReport:
+		text = "started a new session"
+		if n.Text != "" {
+			text += "; " + n.Text
+		}
+		// The dropped queue texts prove nothing survives the switch (R13).
 		if len(n.Dropped.Steering) > 0 {
 			text += fmt.Sprintf("; dropped steering: %q", n.Dropped.Steering)
 		}

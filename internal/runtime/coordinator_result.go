@@ -66,6 +66,34 @@ func (c *Coordinator) handleAbort(cmd coordCommand) {
 	cmd.ack <- nil
 }
 
+// handleNew reports one /new sequence outcome as a loop-owned notice. A
+// failed sequence is a routing failure and the operation (if any) keeps
+// running so its settle is still attributed. A cancelled switch keeps the
+// current session (and its active run); the queue was still cleared, so the
+// report carries both. A completed switch supersedes the running operation:
+// the report is its single terminal outcome and trailing old-run events stay
+// suppressed until the next agent_start (see handleEvent).
+func (c *Coordinator) handleNew(cmd coordCommand) {
+	if cmd.err != nil {
+		c.log.Error("new session sequence failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+		cmd.ack <- nil
+		return
+	}
+	if cmd.cancelled {
+		c.log.Info("new session cancelled; keeping current session")
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeNewSessionReport, Text: "session switch cancelled", Dropped: cmd.dropped})
+		cmd.ack <- nil
+		return
+	}
+	c.op = nil
+	c.state = stateSuperseded
+	c.stopHeartbeat()
+	c.log.Info("session superseded")
+	c.notifier.Notice(context.Background(), Notice{Kind: NoticeNewSessionReport, Dropped: cmd.dropped})
+	cmd.ack <- nil
+}
+
 // handleStatus reports one /status query outcome as a loop-owned notice. A
 // failed get_state is a routing failure with the failure cause, mirroring
 // the prompt-failure pattern; neither path is silent. The query never touches

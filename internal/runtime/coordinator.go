@@ -68,6 +68,7 @@ const (
 	cmdResult                // the RPC outcome of a submission
 	cmdStatus                // a /status query outcome; read-only, no operation state
 	cmdAbort                 // a /abort sequence outcome; terminates the running operation
+	cmdNew                   // a /new sequence outcome; supersedes the running operation
 )
 
 type coordCommand struct {
@@ -75,7 +76,8 @@ type coordCommand struct {
 	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
 	status      State         // the /status query outcome for cmdStatus
-	dropped     QueueContents // the clear_queue outcome for cmdAbort
+	dropped     QueueContents // the clear_queue outcome for cmdAbort and cmdNew
+	cancelled   bool          // the new_session outcome for cmdNew
 	err         error
 	ack         chan error
 }
@@ -140,7 +142,8 @@ func (c *Coordinator) Close() {
 
 // Done closes when the coordinator stops.
 // HandleUserInput routes one user input. /status runs a read-only get_state
-// query; /abort runs clear_queue then abort; /new routes in Task 15; everything
+// query; /abort runs clear_queue then abort; /new runs clear_queue then
+// new_session and supersedes the active run; everything
 // else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
 // because Pi is the authority on run state. The method returns after the RPC
@@ -152,9 +155,13 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 	if text == "/abort" {
 		return c.handleAbortRequest(ctx)
 	}
+	if text == "/new" {
+		return c.handleNewRequest(ctx)
+	}
 	if isReservedCommand(text) {
-		// /new lands in Task 15.
-		c.log.Info("reserved command; routing lands in slice 4", "kind", text)
+		// Defensive: every reserved name routes above. This branch only
+		// fires if a new reserved name is added to the classifier first.
+		c.log.Info("reserved command routed above", "kind", text)
 		return nil
 	}
 
@@ -254,6 +261,33 @@ func (c *Coordinator) clearQueueAndAbort(ctx context.Context) (QueueContents, er
 	return dropped, nil
 }
 
+// handleNewRequest routes /new with immediate-execution semantics: clear the
+// steering queue, then switch to a new session, then post the sequence
+// outcome so the loop alone owns the supersede transition (R13).
+func (c *Coordinator) handleNewRequest(ctx context.Context) error {
+	dropped, cancelled, err := c.clearQueueAndNewSession(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdNew, dropped: dropped, cancelled: cancelled, err: err})
+}
+
+// clearQueueAndNewSession runs the immediate-execution sequence: drain queued
+// steering and follow-up messages first so nothing survives the switch, then
+// start a new session (an extension handler can still cancel it). It
+// short-circuits on the first failure; the loop reports it and the operation
+// (if any) keeps running so its settle is still attributed.
+func (c *Coordinator) clearQueueAndNewSession(ctx context.Context) (QueueContents, bool, error) {
+	dropped, err := c.client.ClearQueue(ctx)
+	if err != nil {
+		return QueueContents{}, false, err
+	}
+	cancelled, err := c.client.NewSession(ctx)
+	if err != nil {
+		return dropped, false, err
+	}
+	return dropped, cancelled, nil
+}
+
 // handleStatusRequest routes /status: a read-only get_state query whose
 // outcome the loop reports as a Status notice. It never touches operation
 // state and uses no begin/result handshake, so it routes while a run is
@@ -300,6 +334,8 @@ func (c *Coordinator) loop() {
 				c.handleStatus(cmd)
 			case cmdAbort:
 				c.handleAbort(cmd)
+			case cmdNew:
+				c.handleNew(cmd)
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)
@@ -361,6 +397,9 @@ func (c *Coordinator) drainEvents() {
 // startOperation promotes the pending submit into the tracked operation. It
 // reports false when an operation already runs (Pi would have queued, not
 // started); the caller still gets a clean ack and the state stays honest.
+// A post-/new suppression survives a new operation start: only the next
+// agent_start re-arms attribution, so a late settle from the superseded run
+// can never complete the new operation (R13).
 func (c *Coordinator) startOperation(pending *operation) bool {
 	if c.op != nil {
 		c.log.Error("prompt started a second run while an operation is running")
@@ -368,7 +407,9 @@ func (c *Coordinator) startOperation(pending *operation) bool {
 	}
 	pending.startedAt = time.Now()
 	c.op = pending
-	c.state = stateRunning
+	if c.state != stateSuperseded {
+		c.state = stateRunning
+	}
 	c.startHeartbeat()
 	c.log.Info("operation started")
 	return true
@@ -425,7 +466,15 @@ func (c *Coordinator) lastAssistantText() (*string, error) {
 // handleEvent classifies one session event. Attribution rule: events attach
 // to the running operation, else to the pending submit, else they are logged
 // as unassociated and never attributed (design "Operation state machine").
+// After /new supersedes the session, trailing events from the old run are
+// dropped until the next agent_start re-arms attribution (R13).
 func (c *Coordinator) handleEvent(e Event) {
+	if c.state == stateSuperseded && !c.endSupersede(e) {
+		// A late settle from the superseded run can never complete a later
+		// input: it is logged with its type and dropped here.
+		c.log.Debug("trailing event after supersede", "type", e.Type)
+		return
+	}
 	switch e.Type {
 	case eventAgentStart:
 		c.noteAgentStart()
@@ -444,6 +493,23 @@ func (c *Coordinator) handleEvent(e Event) {
 		// Compaction, retry, and queue events: metadata only, no content.
 		c.log.Debug("session event", "type", e.Type)
 	}
+}
+
+// endSupersede reports whether e ends the post-/new trailing-event
+// suppression. Only the next agent_start re-arms attribution: it must belong
+// to a new run because the superseded run already started. The start itself
+// is still processed normally so an extension run that begins right after
+// /new keeps its attribution.
+func (c *Coordinator) endSupersede(e Event) bool {
+	if e.Type != eventAgentStart {
+		return false
+	}
+	if c.op != nil {
+		c.state = stateRunning
+	} else {
+		c.state = stateIdle
+	}
+	return true
 }
 
 func (c *Coordinator) noteAgentStart() {
