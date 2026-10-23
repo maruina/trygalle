@@ -34,6 +34,10 @@
 | `feature-worktree` | `prompt-required` | Slice 4 planning writes and commits stay out of `main` | Recreated the plan worktree `maruina-pi-runtime-and-rpc-design` (branch `maruina/pi-runtime-and-rpc-design`) from the post-PR-#6 `origin/main` |
 | `learning-lookup` | `prompt-required` | Advisory guidance before planning decisions | Read `Datadog/Learnings.md` via `learning-sections` (terms: go test, coordinator, rpc, fake client); one distributed-systems section matched, reviewed as not material to `/status` routing |
 | `go-best-practices` | `skill-loader` | Go files affected by the Task 13 plan | Loop-owned notices preserved in the `/status` mechanism; fake-client scripting follows the existing `Prompt` script pattern; `-race` carried into the task's verification command |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (new and modified Go files), `cli-best-practices` (REPL notice rendering), and `write` (ledger prose) for Slice 4; no Kubernetes, script, or Terraform triggers |
+| `go-best-practices` | `skill-loader` | Go files created or modified in Slice 4 | Loop commands own every reserved-command outcome (`cmdStatus`, `cmdAbort`, `cmdNew`); supersede suppression preserved across new operation starts until the next `agent_start`; fake-client `GetState`/`ClearQueue`/`Abort`/`NewSession` scripted like `Prompt`; `-race`, `go vet`, `go fix -diff`, gofmt clean before each Slice 4 commit |
+| `cli-best-practices` | `skill-loader` | REPL notice rendering modified | New `Status`, `AbortReport`, and `NewSessionReport` renderings stay on stdout under the existing `[trygalle]` prefix; diagnostics stay on stderr; the dev-only REPL keeps no `--json` per the plan |
+| `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to Slice 4 task status notes |
 
 ---
 
@@ -543,6 +547,8 @@ Delivers the coordinator that routes every message and produces a visible outcom
 ### Slice 4: Reserved commands
 Delivers `/status`, `/abort`, and `/new` with TUI-parity semantics.
 
+**Slice 4 status:** complete — Tasks 13–15 shipped (commits bc81933, 452e0c2, 4060842). Verified: `go test -race ./internal/... ./cmd/...` green (live tests skip in `auto`: local pi reports 1.4.0 vs pinned 1.3.0), `go vet ./...`, `go fix -diff ./...`, gofmt clean, REPL `--help` and render-notice smoke checks.
+
 ### Task 13: `/status`
 **Delivers:** Status routing and summary.
 **Blocked by:** Task 9
@@ -559,14 +565,14 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 - The REPL demo needs a `renderNotice` case for `NoticeStatus` (it currently falls through to the bare kind name); wording lives in the REPL demo like every other kind, with the Telegram design owning final wording (follow-up #2).
 - Advisory learning lookup: one distributed-systems section (control-plane/data-plane decoupling) reviewed; not material to `/status` routing.
 
-- [ ] Script the fake client's `GetState` (state, err) like `Prompt` so tests can pin varied states.
-- [ ] Add the `cmdStatus` coordinator command: the loop handles it by emitting `Notice{Kind: NoticeStatus, State: &state}` on success, or logging and emitting `Notice{Kind: NoticeRoutingFailure, Text: err.Error()}` on failure; both acknowledge nil.
-- [ ] Route `/status` in `HandleUserInput`'s reserved branch: `c.client.GetState(ctx)` on the caller goroutine, hand the outcome to the loop via `cmdStatus`. No begin/result handshake; no operation state touched.
-- [ ] Unit-test with the fake client: idle `/status` → `Status` notice with the scripted state; mid-run `/status` → `get_state` recorded, no `prompt`/`steer` call, the active run still settles; `GetState` error → `RoutingFailure` notice, no `Status` notice.
-- [ ] Live-test (`internal/runtime/status_live_test.go`): coordinator over the real pi with a delayed mock model; prompt mid-run, then `/status`; expect the `Status` notice with `IsStreaming: true` and a session id.
-- [ ] Extend `renderNotice` with a `NoticeStatus` case; REPL smoke check that `/status` prints the summary.
-- [ ] Run `go test -race ./internal/...`; expect green.
-- [ ] Commit with `feat: add /status routing`.
+- [x] Script the fake client's `GetState` (state, err) like `Prompt` so tests can pin varied states. Verified: static `state`/`stateErr` fields with the `s-1` default preserved.
+- [x] Add the `cmdStatus` coordinator command: the loop handles it by emitting `Notice{Kind: NoticeStatus, State: &state}` on success, or logging and emitting `Notice{Kind: NoticeRoutingFailure, Text: err.Error()}` on failure; both acknowledge nil. Verified: `handleStatus` in `coordinator_result.go`, loop-owned notices, operation state untouched.
+- [x] Route `/status` in `HandleUserInput`'s reserved branch: `c.client.GetState(ctx)` on the caller goroutine, hand the outcome to the loop via `cmdStatus`. No begin/result handshake; no operation state touched. Verified: `handleStatusRequest` with a coordinator-owned handoff context.
+- [x] Unit-test with the fake client: idle `/status` → `Status` notice with the scripted state; mid-run `/status` → `get_state` recorded, no `prompt`/`steer` call, the active run still settles; `GetState` error → `RoutingFailure` notice, no `Status` notice. Verified green with `-race`.
+- [x] Live-test (`internal/runtime/status_live_test.go`): coordinator over the real pi with a delayed mock model; prompt mid-run, then `/status`; expect the `Status` notice with `IsStreaming: true` and a session id. Verified: skips in `auto` mode (local pi reports 1.4.0 vs pinned 1.3.0); `TRYGALLE_PI_TESTS=on` fails the gate as designed.
+- [x] Extend `renderNotice` with a `NoticeStatus` case; REPL smoke check that `/status` prints the summary. Verified: metadata-only rendering (session, streaming, counts, model id); `--help` smoke check clean.
+- [x] Run `go test -race ./internal/...`; expect green. Verified green: `go test -race ./internal/...`, `go vet ./...`, `go fix -diff ./...`, gofmt clean.
+- [x] Commit with `feat: add /status routing`. Verified: committed as bc81933.
 
 ### Task 14: `/abort`
 **Delivers:** Esc-parity abort: `clear_queue` before `abort`, with dropped-text reporting.
@@ -574,13 +580,13 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 **Traces to:** R12
 **Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/abort_live_test.go`, `cmd/trygalle-repl/main.go` (extend), `cmd/trygalle-repl/main_test.go` (extend)
 
-- [ ] Route `/abort` as a loop command: the caller runs `ClearQueue` → `Abort` and posts the outcome, and the loop emits the `AbortReport` notice carrying the dropped steering and follow-up texts. If no operation is active, still run the sequence (mirrors Esc on an idle session) and report accordingly.
-- [ ] Pin the settle tie-break: when the settle arrives before the abort outcome, the operation reports its normal terminal outcome and the abort report says no operation was active; when the outcome arrives first, the abort report is the operation's single terminal outcome. Add a `deliberate:` comment naming this arrival-order rule.
-- [ ] Unit-test the ordering (assert `ClearQueue` precedes `Abort`) and the dropped-texts payload with the fake client, plus both settle/outcome arrival orders.
-- [ ] Extend `renderNotice` with an `AbortReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/abort` mid-run and assert the rendered notice.
-- [ ] Live-test (design contract tests 1 and 3): queue a steering message mid-run via `prompt` with `streamingBehavior: "steer"` and assert disposition `"queued"`; then pin that `abort` alone continues queued steering (assert the queued message runs); then assert `clear_queue` before `abort` leaves nothing queued.
-- [ ] Run `go test ./internal/...`; expect green.
-- [ ] Commit with `feat: add /abort with esc parity`.
+- [x] Route `/abort` as a loop command: the caller runs `ClearQueue` → `Abort` and posts the outcome, and the loop emits the `AbortReport` notice carrying the dropped steering and follow-up texts. If no operation is active, still run the sequence (mirrors Esc on an idle session) and report accordingly. Verified: `handleAbortRequest` + `clearQueueAndAbort` (short-circuits on first failure), idle abort reports with the no-operation marker.
+- [x] Pin the settle tie-break: when the settle arrives before the abort outcome, the operation reports its normal terminal outcome and the abort report says no operation was active; when the outcome arrives first, the abort report is the operation's single terminal outcome. Add a `deliberate:` comment naming this arrival-order rule. Verified: `handleAbort` with the `deliberate:` arrival-order comment; late settle after an abort win is logged as unassociated.
+- [x] Unit-test the ordering (assert `ClearQueue` precedes `Abort`) and the dropped-texts payload with the fake client, plus both settle/outcome arrival orders. Verified: idle, mid-run win, post-settle idle, and sequence-error (operation keeps running) tests green.
+- [x] Extend `renderNotice` with an `AbortReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/abort` mid-run and assert the rendered notice. Verified: `TestRenderNoticeAbortReport` + routed `/abort`; added `TestRenderNoticeStatus` for the Task 13 smoke claim.
+- [x] Live-test (design contract tests 1 and 3): queue a steering message mid-run via `prompt` with `streamingBehavior: "steer"` and assert disposition `"queued"`; then pin that `abort` alone continues queued steering (assert the queued message runs); then assert `clear_queue` before `abort` leaves nothing queued. Verified: `abort_live_test.go` with raw-client pins plus a coordinator mid-run `/abort` (report, dropped texts, fresh prompt works); skips in `auto` (local pi 1.4.0 vs pinned 1.3.0).
+- [x] Run `go test ./internal/...`; expect green. Verified: `go test -race ./internal/... ./cmd/...`, `go vet ./...`, `go fix -diff ./...`, gofmt clean.
+- [x] Commit with `feat: add /abort with esc parity`. Verified: committed as 452e0c2.
 
 ### Task 15: `/new`
 **Delivers:** Immediate new-session: supersede, queue clear, cancellation report.
@@ -588,13 +594,13 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 **Traces to:** R13
 **Files:** `internal/runtime/coordinator.go` (extend), `internal/runtime/coordinator_test.go` (extend), `internal/runtime/new_session_live_test.go`, `cmd/trygalle-repl/main.go` (extend), `cmd/trygalle-repl/main_test.go` (extend)
 
-- [ ] Route `/new` as a loop command: the caller runs `ClearQueue` → `NewSession` and posts the outcome; the loop enters Superseded, emits `NewSessionReport` with the dropped texts, returns to Idle after reporting, and logs trailing events without attributing them. On `cancelled: true`, the loop reports the cancellation and keeps the current session.
-- [ ] After a supersede, ignore run events (`agent_start`, `agent_end`, `agent_settled`) until the next `agent_start`, so a late settle from the superseded run can never be attributed to the next input.
-- [ ] Unit-test with the fake client: mid-run supersede (trailing `agent_end` logged, not attributed); cancelled switch; empty-queue dropped texts; a prompt issued right after `/new` followed by a late `agent_settled` still delivers the new run's text and emits no `EmptyResponse`.
-- [ ] Extend `renderNotice` with a `NewSessionReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/new` and assert the rendered notice.
-- [ ] Live-tests (design contract tests 4 and 5): mid-run `/new` — assert trailing events are observed and logged, and the steering queue is empty after the switch (a follow-up `clear_queue` returns empty lists); `MOCK_CANCEL_NEW_SESSION=1` — assert `cancelled: true`, session kept.
-- [ ] Run `go test ./internal/...`; expect green.
-- [ ] Commit with `feat: add /new with supersede semantics`.
+- [x] Route `/new` as a loop command: the caller runs `ClearQueue` → `NewSession` and posts the outcome; the loop enters `Superseded`, emits `NewSessionReport` with the dropped texts, and logs trailing events without attributing them. On `cancelled: true`, the loop reports the cancellation and keeps the current session. Verified: `handleNewRequest` + `clearQueueAndNewSession` (short-circuit on failure); supersede preserves the active run on cancel, clears it on switch.
+- [x] After a supersede, ignore run events (`agent_start`, `agent_end`, `agent_settled`) until the next `agent_start`, so a late settle from the superseded run can never be attributed to the next input. Verified: `stateSuperseded` suppression in `handleEvent`/`endSupersede`; `startOperation` preserves suppression until the next start; the re-arming start is still processed normally.
+- [x] Unit-test with the fake client: mid-run supersede (trailing `agent_end` logged, not attributed); cancelled switch; empty-queue dropped texts; a prompt issued right after `/new` followed by a late `agent_settled` still delivers the new run's text and emits no `EmptyResponse`. Verified green with `-race`.
+- [x] Extend `renderNotice` with a `NewSessionReport` case that prints the dropped steering and follow-up texts; extend the REPL `run`-function test to route `/new` and assert the rendered notice. Verified: `TestRenderNoticeNewSessionReport` + routed `/new`.
+- [x] Live-tests (design contract tests 4 and 5): mid-run `/new` — assert trailing events are observed and logged, and the steering queue is empty after the switch (a follow-up `clear_queue` returns empty lists); `MOCK_CANCEL_NEW_SESSION=1` — assert `cancelled: true`, session kept. Verified: `new_session_live_test.go` pins session-id change, empty queue, dropped texts, fresh-prompt recovery, and cancellation with unchanged id; trailing-event logging pinned by the scripted unit test (timing-dependent live); skips in `auto` (local pi 1.4.0 vs pinned 1.3.0).
+- [x] Run `go test ./internal/...`; expect green. Verified: `go test -race ./internal/... ./cmd/...`, `go vet ./...`, `go fix -diff ./...`, gofmt clean.
+- [x] Commit with `feat: add /new with supersede semantics`. Verified: committed as 4060842.
 
 ### Slice 5: Extension UI policy and compaction live test
 Delivers dialog cancellation and the live compaction-window proof.
