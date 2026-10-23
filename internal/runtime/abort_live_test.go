@@ -77,14 +77,31 @@ func liveAgentStart(events []rpc.Event) bool {
 	})
 }
 
-// TestLiveAbortAloneLeavesQueueRunning pins that abort without a preceding
-// clear_queue does not drain queued steering: the queued message still runs
-// to its own agent_start after the abort (design contract test 1, second
-// case). This is the Pi behavior that makes clear_queue-before-abort the
-// Esc-parity sequence.
-func TestLiveAbortAloneLeavesQueueRunning(t *testing.T) {
+// liveAbort sends one raw abort command and requires success.
+func liveAbort(t *testing.T, client *rpc.Client) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), abortLiveTimeout)
+	defer cancel()
+	resp, err := client.Send(ctx, rpc.AbortCommand())
+	if err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("abort failed: %s", resp.Error)
+	}
+}
+
+// TestLiveAbortAloneDoesNotRunQueuedSteering pins why /abort must clear the
+// queue first: agent_start fires once per agent-loop invocation, so a queued
+// steering message can never start a run after an abort. It either joins the
+// aborted run's final turn and is aborted with it, or stays queued for the
+// next prompt; either way it produces no answer. This is the Pi behavior that
+// makes clear_queue-before-abort the Esc-parity sequence (design contract
+// tests 1 and 3).
+func TestLiveAbortAloneDoesNotRunQueuedSteering(t *testing.T) {
 	bin := harness.Pi(t)
 	model := harness.StartMockModel(t)
+	model.RespondText("answer to the first run")
 	model.Delay(2 * time.Second) // hold run 1 open past the queued steer
 	client := harness.Start(t, bin, harness.WithModel(model))
 	defer client.CloseStdin()
@@ -98,21 +115,22 @@ func TestLiveAbortAloneLeavesQueueRunning(t *testing.T) {
 	}
 
 	// Abort alone: no clear_queue first.
+	liveAbort(t, client)
+
+	// The aborted run settles without another agent_start: the queued message
+	// never becomes its own run, and the session keeps no assistant answer.
+	events := liveEventsUntil(t, client, func(e rpc.Event) bool { return e.Type == rpc.EventAgentSettled })
+	if liveAgentStart(events) {
+		t.Fatalf("agent_start after abort alone; the queued message became a run (saw %d events)", len(events))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), abortLiveTimeout)
 	defer cancel()
-	resp, err := client.Send(ctx, rpc.AbortCommand())
+	last, err := client.GetLastAssistantText(ctx)
 	if err != nil {
-		t.Fatalf("abort: %v", err)
+		t.Fatalf("get_last_assistant_text: %v", err)
 	}
-	if !resp.Success {
-		t.Fatalf("abort failed: %s", resp.Error)
-	}
-
-	// The queued message still runs: a new agent_start follows the abort,
-	// then the run settles.
-	events := liveEventsUntil(t, client, func(e rpc.Event) bool { return e.Type == rpc.EventAgentSettled })
-	if !liveAgentStart(events) {
-		t.Fatalf("no agent_start after abort alone; the queued message did not run (saw %d events)", len(events))
+	if last != nil {
+		t.Fatalf("last assistant text = %q after abort alone, want no answer for the queued message", *last)
 	}
 }
 
@@ -139,15 +157,7 @@ func TestLiveClearQueueBeforeAbortDrainsQueue(t *testing.T) {
 		t.Fatalf("clear_queue steering = %q, want the queued message", dropped.Steering)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), abortLiveTimeout)
-	defer cancel()
-	resp, err := client.Send(ctx, rpc.AbortCommand())
-	if err != nil {
-		t.Fatalf("abort: %v", err)
-	}
-	if !resp.Success {
-		t.Fatalf("abort failed: %s", resp.Error)
-	}
+	liveAbort(t, client)
 
 	var again rpc.QueueContents
 	liveCommand(t, client, rpc.ClearQueueCommand(), &again)
@@ -162,6 +172,7 @@ func TestLiveClearQueueBeforeAbortDrainsQueue(t *testing.T) {
 func TestLiveCoordinatorAbortMidRun(t *testing.T) {
 	bin := harness.Pi(t)
 	model := harness.StartMockModel(t)
+	model.RespondText("answer after abort")
 	model.Delay(3 * time.Second) // hold the run open past /abort
 	client := harness.Start(t, bin, harness.WithModel(model))
 	n := newRecordingNotifier()
@@ -179,7 +190,13 @@ func TestLiveCoordinatorAbortMidRun(t *testing.T) {
 	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
 		t.Fatalf("HandleUserInput(/abort): %v", err)
 	}
+	// The abort report is the aborted run's single terminal outcome: no
+	// EmptyResponse or stale response precedes it (waitForNotice fails on
+	// either), and it does not claim the session was idle.
 	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "" {
+		t.Errorf("mid-run AbortReport text = %q, want empty (an operation was aborted)", notice.Text)
+	}
 	if !slices.Contains(notice.Dropped.Steering, "steered follow-up") {
 		t.Fatalf("AbortReport dropped = %+v, want the queued steering", notice.Dropped)
 	}
@@ -191,8 +208,8 @@ func TestLiveCoordinatorAbortMidRun(t *testing.T) {
 	}
 	select {
 	case text := <-n.responses:
-		if text == "" {
-			t.Error("post-abort response is empty")
+		if text != "answer after abort" {
+			t.Errorf("post-abort response = %q, want the scripted answer", text)
 		}
 	case extra := <-n.notices:
 		t.Fatalf("unexpected notice %q instead of the post-abort response", extra.Kind)

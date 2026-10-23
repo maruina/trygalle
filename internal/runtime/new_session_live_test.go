@@ -50,6 +50,7 @@ func liveClearQueue(t *testing.T, client *rpc.Client) rpc.QueueContents {
 func TestLiveNewSessionMidRun(t *testing.T) {
 	bin := harness.Pi(t)
 	model := harness.StartMockModel(t)
+	model.RespondText("answer after new")
 	model.Delay(3 * time.Second) // hold the run open past /new
 	client := harness.Start(t, bin, harness.WithModel(model))
 	n := newRecordingNotifier()
@@ -72,6 +73,9 @@ func TestLiveNewSessionMidRun(t *testing.T) {
 	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
 		t.Fatalf("HandleUserInput(/new): %v", err)
 	}
+	// The new-session report is the superseded run's single terminal outcome:
+	// no EmptyResponse or stale response precedes it (waitForNotice fails on
+	// either).
 	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
 	if !slices.Contains(notice.Dropped.Steering, "steering to drop") {
 		t.Fatalf("NewSessionReport dropped = %+v, want the queued steering", notice.Dropped)
@@ -92,8 +96,8 @@ func TestLiveNewSessionMidRun(t *testing.T) {
 	}
 	select {
 	case text := <-n.responses:
-		if text == "" {
-			t.Error("post-/new response is empty")
+		if text != "answer after new" {
+			t.Errorf("post-/new response = %q, want the scripted answer", text)
 		}
 	case extra := <-n.notices:
 		t.Fatalf("unexpected notice %q instead of the post-/new response", extra.Kind)

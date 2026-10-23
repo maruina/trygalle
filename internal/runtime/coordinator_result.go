@@ -40,25 +40,29 @@ func (c *Coordinator) handlePromptFailure(cmd coordCommand) {
 // A failed sequence is a routing failure and the operation (if any) keeps
 // running so its settle is still attributed.
 //
-// deliberate: arrival order against agent_settled decides attribution. When
-// the settle was already processed, the operation reported its normal
-// terminal outcome and the abort report only says no operation was active
-// (NoticeAbortReport with Text set). When the abort outcome arrives first, it
-// is the operation's single terminal outcome: the loop clears the operation
-// so a late settle from the aborted run is logged as unassociated and never
-// attributed to a later input.
+// The reserved-command window decides attribution: an operation that settled
+// while the sequence ran was deferred, so the AbortReport is the operation's
+// single terminal outcome. The report names the no-operation case only when no
+// operation was active when /abort opened the window. The window suppresses
+// trailing events until the next agent_start, so a late settle from the
+// aborted run can never complete a later input.
 func (c *Coordinator) handleAbort(cmd coordCommand) {
+	hadOp := c.reservedHadOp
+	c.reserved = false
+	c.reservedHadOp = false
 	if cmd.err != nil {
+		c.flushDeferred()
 		c.log.Error("abort sequence failed", "error", cmd.err)
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
 		cmd.ack <- nil
 		return
 	}
-	if c.op == nil {
+	c.discardDeferred()
+	if !hadOp {
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Text: "no operation was active", Dropped: cmd.dropped})
 	} else {
 		c.op = nil
-		c.state = stateIdle
+		c.state = stateSuperseded
 		c.stopHeartbeat()
 		c.log.Info("operation aborted")
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Dropped: cmd.dropped})
@@ -70,22 +74,29 @@ func (c *Coordinator) handleAbort(cmd coordCommand) {
 // failed sequence is a routing failure and the operation (if any) keeps
 // running so its settle is still attributed. A cancelled switch keeps the
 // current session (and its active run); the queue was still cleared, so the
-// report carries both. A completed switch supersedes the running operation:
-// the report is its single terminal outcome and trailing old-run events stay
-// suppressed until the next agent_start (see handleEvent).
+// report carries both, and an operation that settled inside the window is
+// flushed so its answer is not lost. A completed switch supersedes the
+// running operation: the report is its single terminal outcome (any deferred
+// one is dropped) and trailing old-run events stay suppressed until the next
+// agent_start (see handleEvent).
 func (c *Coordinator) handleNew(cmd coordCommand) {
+	c.reserved = false
+	c.reservedHadOp = false
 	if cmd.err != nil {
+		c.flushDeferred()
 		c.log.Error("new session sequence failed", "error", cmd.err)
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
 		cmd.ack <- nil
 		return
 	}
 	if cmd.cancelled {
+		c.flushDeferred()
 		c.log.Info("new session cancelled; keeping current session")
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeNewSessionReport, Text: "session switch cancelled", Dropped: cmd.dropped})
 		cmd.ack <- nil
 		return
 	}
+	c.discardDeferred()
 	c.op = nil
 	c.state = stateSuperseded
 	c.stopHeartbeat()
