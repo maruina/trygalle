@@ -18,6 +18,9 @@ import (
 // errFakeGetState scripts a get_state failure for the status error path.
 var errFakeGetState = errors.New("fake get_state failure")
 
+// errFakeAbort scripts an abort-sequence failure.
+var errFakeAbort = errors.New("fake abort failure")
+
 // fakeClient is a scripted PiClient: the test sets the canned results, and the
 // fake records the commands the coordinator routes. It implements the record
 // seams; it does not reimplement Pi behavior.
@@ -37,6 +40,9 @@ type fakeClient struct {
 	textErr          error
 	state            rpc.State
 	stateErr         error
+	queue            rpc.QueueContents
+	clearQueueErr    error
+	abortErr         error
 
 	// events carries the state events the test plays. An event pushed before
 	// the canned prompt response returns matches the wire-order guarantee the
@@ -119,12 +125,12 @@ func (f *fakeClient) GetCommands(ctx context.Context) ([]rpc.CommandInfo, error)
 
 func (f *fakeClient) Abort(ctx context.Context) error {
 	f.record("abort")
-	return nil
+	return f.abortErr
 }
 
 func (f *fakeClient) ClearQueue(ctx context.Context) (rpc.QueueContents, error) {
 	f.record("clear_queue")
-	return rpc.QueueContents{}, nil
+	return f.queue, f.clearQueueErr
 }
 
 func (f *fakeClient) NewSession(ctx context.Context) (bool, error) {
@@ -588,16 +594,15 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 		t.Fatalf("HandleUserInput while active: %v", err)
 	}
 	n.waitForNotice(t, runtime.NoticeSteerAcknowledged)
-	// /status reports without disturbing the run; /abort and /new still
-	// stub out to their Slice 4 tasks.
+	// /status reports without disturbing the run; /new still stubs out to
+	// Task 15. /abort now terminates the run (covered by the abort tests),
+	// so it no longer belongs in this settle-normally flow.
 	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
 		t.Fatalf("/status while active: %v", err)
 	}
 	n.waitForNotice(t, runtime.NoticeStatus)
-	for _, cmd := range []string{"/abort", "/new"} {
-		if err := c.HandleUserInput(context.Background(), cmd); err != nil {
-			t.Errorf("%s while active: %v", cmd, err)
-		}
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Errorf("/new while active: %v", err)
 	}
 
 	// The first run still settles normally afterwards.
@@ -754,5 +759,127 @@ func TestStatusErrorEmitsRoutingFailure(t *testing.T) {
 	case extra := <-n.responses:
 		t.Errorf("unexpected response %q after failed status", extra)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestAbortIdleRunsSequenceAndReports(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	// Esc on an idle session still runs the sequence and reports.
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "no operation was active" {
+		t.Errorf("idle AbortReport text = %q, want the no-operation marker", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) ||
+		!slices.Equal(notice.Dropped.FollowUp, []string{"follow"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared queue", notice.Dropped)
+	}
+	assertClearQueueBeforeAbort(t, f)
+}
+
+func assertClearQueueBeforeAbort(t *testing.T, f *fakeClient) {
+	t.Helper()
+	calls := f.getCalls()
+	clearIdx := slices.Index(calls, "clear_queue")
+	abortIdx := slices.Index(calls, "abort")
+	if clearIdx < 0 || abortIdx < 0 {
+		t.Fatalf("abort sequence calls = %v, want clear_queue then abort", calls)
+	}
+	if clearIdx > abortIdx {
+		t.Errorf("abort sequence order = %v, want clear_queue before abort", calls)
+	}
+}
+
+func TestAbortMidRunTerminatesOperation(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	// The abort outcome arrives before the settle: it is the operation's
+	// single terminal outcome.
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("/abort while active: %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "" {
+		t.Errorf("mid-run AbortReport text = %q, want empty (an operation was aborted)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared steering", notice.Dropped)
+	}
+	assertClearQueueBeforeAbort(t, f)
+
+	// A late settle from the aborted run is logged, never attributed: no
+	// second outcome follows the abort report.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q after the abort report", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q after the abort report", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestAbortAfterSettleReportsIdle(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.queue = rpc.QueueContents{FollowUp: []string{"leftover"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	// The settle arrives before the abort outcome: the operation reports its
+	// normal terminal outcome first.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Fatalf("response = %q, want %q", got, "final")
+	}
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "no operation was active" {
+		t.Errorf("post-settle AbortReport text = %q, want the no-operation marker", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.FollowUp, []string{"leftover"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared follow-up", notice.Dropped)
+	}
+}
+
+func TestAbortSequenceErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.abortErr = errFakeAbort
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if !strings.Contains(notice.Text, "fake abort failure") {
+		t.Errorf("RoutingFailure text = %q, want the abort failure cause", notice.Text)
+	}
+
+	// The failed sequence leaves the operation running: its settle is still
+	// attributed normally.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
 	}
 }

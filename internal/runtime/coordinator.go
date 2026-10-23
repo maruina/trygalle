@@ -67,13 +67,15 @@ const (
 	cmdBegin  cmdKind = iota // an input is about to be submitted to Pi
 	cmdResult                // the RPC outcome of a submission
 	cmdStatus                // a /status query outcome; read-only, no operation state
+	cmdAbort                 // a /abort sequence outcome; terminates the running operation
 )
 
 type coordCommand struct {
 	kind        cmdKind
 	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
-	status      State // the /status query outcome for cmdStatus
+	status      State         // the /status query outcome for cmdStatus
+	dropped     QueueContents // the clear_queue outcome for cmdAbort
 	err         error
 	ack         chan error
 }
@@ -138,7 +140,7 @@ func (c *Coordinator) Close() {
 
 // Done closes when the coordinator stops.
 // HandleUserInput routes one user input. /status runs a read-only get_state
-// query; /abort and /new route later in Slice 4 (Tasks 14-15); everything
+// query; /abort runs clear_queue then abort; /new routes in Task 15; everything
 // else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
 // because Pi is the authority on run state. The method returns after the RPC
@@ -147,8 +149,11 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 	if text == "/status" {
 		return c.handleStatusRequest(ctx)
 	}
+	if text == "/abort" {
+		return c.handleAbortRequest(ctx)
+	}
 	if isReservedCommand(text) {
-		// /abort and /new land later in Slice 4 (Tasks 14-15).
+		// /new lands in Task 15.
 		c.log.Info("reserved command; routing lands in slice 4", "kind", text)
 		return nil
 	}
@@ -223,6 +228,32 @@ func (c *Coordinator) terminalError() error {
 	return errCoordinatorClosed
 }
 
+// handleAbortRequest routes /abort with Esc parity: clear the steering queue
+// before aborting the run, then post the sequence outcome so the loop alone
+// emits the AbortReport and owns the settle tie-break (R12). An idle /abort
+// still runs the sequence, mirroring Esc on an idle session.
+func (c *Coordinator) handleAbortRequest(ctx context.Context) error {
+	dropped, err := c.clearQueueAndAbort(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdAbort, dropped: dropped, err: err})
+}
+
+// clearQueueAndAbort runs the Esc-parity sequence: drain queued steering and
+// follow-up messages first so nothing survives the abort, then abort the
+// run. It short-circuits on the first failure; the loop reports it and the
+// operation (if any) keeps running so its settle is still attributed.
+func (c *Coordinator) clearQueueAndAbort(ctx context.Context) (QueueContents, error) {
+	dropped, err := c.client.ClearQueue(ctx)
+	if err != nil {
+		return QueueContents{}, err
+	}
+	if err := c.client.Abort(ctx); err != nil {
+		return dropped, err
+	}
+	return dropped, nil
+}
+
 // handleStatusRequest routes /status: a read-only get_state query whose
 // outcome the loop reports as a Status notice. It never touches operation
 // state and uses no begin/result handshake, so it routes while a run is
@@ -267,6 +298,8 @@ func (c *Coordinator) loop() {
 				c.handleResult(cmd)
 			case cmdStatus:
 				c.handleStatus(cmd)
+			case cmdAbort:
+				c.handleAbort(cmd)
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)

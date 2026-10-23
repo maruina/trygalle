@@ -36,6 +36,36 @@ func (c *Coordinator) handlePromptFailure(cmd coordCommand) {
 	cmd.ack <- nil
 }
 
+// handleAbort reports one /abort sequence outcome as a loop-owned notice.
+// A failed sequence is a routing failure and the operation (if any) keeps
+// running so its settle is still attributed.
+//
+// deliberate: arrival order against agent_settled decides attribution. When
+// the settle was already processed, the operation reported its normal
+// terminal outcome and the abort report only says no operation was active
+// (NoticeAbortReport with Text set). When the abort outcome arrives first, it
+// is the operation's single terminal outcome: the loop clears the operation
+// so a late settle from the aborted run is logged as unassociated and never
+// attributed to a later input.
+func (c *Coordinator) handleAbort(cmd coordCommand) {
+	if cmd.err != nil {
+		c.log.Error("abort sequence failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+		cmd.ack <- nil
+		return
+	}
+	if c.op == nil {
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Text: "no operation was active", Dropped: cmd.dropped})
+	} else {
+		c.op = nil
+		c.state = stateIdle
+		c.stopHeartbeat()
+		c.log.Info("operation aborted")
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Dropped: cmd.dropped})
+	}
+	cmd.ack <- nil
+}
+
 // handleStatus reports one /status query outcome as a loop-owned notice. A
 // failed get_state is a routing failure with the failure cause, mirroring
 // the prompt-failure pattern; neither path is silent. The query never touches

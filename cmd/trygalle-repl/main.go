@@ -300,6 +300,19 @@ func renderNotice(n runtime.Notice) string {
 		text = "run failed: " + n.Text
 	case runtime.NoticeRoutingFailure:
 		text = "could not deliver the message: " + n.Text
+	case runtime.NoticeAbortReport:
+		text = "aborted the run"
+		if n.Text != "" {
+			text += "; " + n.Text
+		}
+		// The dropped queue texts prove nothing survives the abort (R12).
+		if len(n.Dropped.Steering) > 0 {
+			text += fmt.Sprintf("; dropped steering: %q", n.Dropped.Steering)
+		}
+		if len(n.Dropped.FollowUp) > 0 {
+			text += fmt.Sprintf("; dropped follow-up: %q", n.Dropped.FollowUp)
+		}
+		return text
 	default:
 		text = string(n.Kind)
 	}

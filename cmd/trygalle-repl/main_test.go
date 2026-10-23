@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/maruina/trygalle/internal/runtime"
 )
 
 // fakeHandler records every routed input and fails on demand, simulating an
@@ -42,14 +44,14 @@ func (h *fakeHandler) routed() []string {
 
 func TestRunRoutesInputsBeforeSettlementAndExitsOnEOF(t *testing.T) {
 	h := &fakeHandler{}
-	stdin := io.NopCloser(strings.NewReader("first prompt\nsecond prompt\n/status\n"))
+	stdin := io.NopCloser(strings.NewReader("first prompt\nsecond prompt\n/status\n/abort\n"))
 
 	// The first prompt "stays active": the fake settles nothing, while run()
 	// keeps accepting lines until EOF.
 	if err := run(context.Background(), stdin, nil, h); err != nil {
 		t.Fatalf("run with clean EOF: %v", err)
 	}
-	want := []string{"first prompt", "second prompt", "/status"}
+	want := []string{"first prompt", "second prompt", "/status", "/abort"}
 	got := h.routed()
 	if len(got) != len(want) {
 		t.Fatalf("routed = %v, want %v", got, want)
@@ -164,6 +166,35 @@ func TestRunReturnsFatalWhileStdinOpen(t *testing.T) {
 	case <-time.After(time.Second):
 		reader.Close()
 		t.Fatal("run waited for stdin after failure")
+	}
+}
+
+func TestRenderNoticeAbortReport(t *testing.T) {
+	got := renderNotice(runtime.Notice{
+		Kind:    runtime.NoticeAbortReport,
+		Dropped: runtime.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}},
+	})
+	for _, want := range []string{"aborted", `"steered"`, `"follow"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderNotice(AbortReport) = %q, want it to contain %q", got, want)
+		}
+	}
+
+	idle := renderNotice(runtime.Notice{Kind: runtime.NoticeAbortReport, Text: "no operation was active"})
+	if !strings.Contains(idle, "no operation was active") {
+		t.Errorf("renderNotice(idle AbortReport) = %q, want the no-operation marker", idle)
+	}
+}
+
+func TestRenderNoticeStatus(t *testing.T) {
+	got := renderNotice(runtime.Notice{
+		Kind:  runtime.NoticeStatus,
+		State: &runtime.State{SessionID: "sess-1", IsStreaming: true, MessageCount: 2},
+	})
+	for _, want := range []string{"sess-1", "streaming=true", "messages=2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderNotice(Status) = %q, want it to contain %q", got, want)
+		}
 	}
 }
 
