@@ -38,6 +38,16 @@
 | `go-best-practices` | `skill-loader` | Go files created or modified in Slice 4 | Loop commands own every reserved-command outcome (`cmdStatus`, `cmdAbort`, `cmdNew`); supersede suppression preserved across new operation starts until the next `agent_start`; fake-client `GetState`/`ClearQueue`/`Abort`/`NewSession` scripted like `Prompt`; `-race`, `go vet`, `go fix -diff`, gofmt clean before each Slice 4 commit |
 | `cli-best-practices` | `skill-loader` | REPL notice rendering modified | New `Status`, `AbortReport`, and `NewSessionReport` renderings stay on stdout under the existing `[trygalle]` prefix; diagnostics stay on stderr; the dev-only REPL keeps no `--json` per the plan |
 | `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to Slice 4 task status notes |
+| `resolve-worktree` | `prompt-required` | Plan path must map to its owning worktree | Located the committed plan in the main checkout; the plan worktree reported a merged slice 4 branch, so Slice 5 work moved to a fresh worktree per the user request |
+| `feature-worktree` | `prompt-required` | Slice 5 writes and commits must stay out of `main` | Created `maruina-extension-ui-policy` (branch `maruina/extension-ui-policy`) from the post-PR-#7 `origin/main` |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (new Go test files, coordinator comment) and `write` (ledger prose); no CLI, script, Terraform, or Kubernetes triggers in Task 16 |
+| `go-best-practices` | `skill-loader` | Go files created or modified in Task 16 | External `runtime_test` package asserts logged fields through a `slog.Handler` and keeps the fake client as the seam; live tests run against the pinned pi 1.3.0; `-race`, `go vet`, `go fix -diff`, gofmt clean |
+| `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to the Task 16 status notes |
+| `resolve-worktree` | `prompt-required` | Task 17 plan path must map to its owning worktree | Resolved the plan in `maruina-extension-ui-policy`; every command ran there |
+| `feature-worktree` | `prompt-required` | Task 17 writes and commits must stay out of `main` | Continued in the existing slice-5 worktree on branch `maruina/extension-ui-policy` |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` and `write` for Task 17; no CLI, script, Terraform, or Kubernetes triggers |
+| `go-best-practices` | `skill-loader` | Go files created or modified in Task 17 | External `runtime_test` live tests poll `get_state` instead of taking the event stream from the coordinator; the mock keeps metadata-only captures and gains one scripted overflow response; `-race`, `go vet`, `go fix -diff`, gofmt clean |
+| `write` | `skill-loader` | The plan ledger and test comments are prose artifacts | Applied to the Task 17 status notes and the recorded trigger |
 
 ---
 
@@ -605,17 +615,21 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 ### Slice 5: Extension UI policy and compaction live test
 Delivers dialog cancellation and the live compaction-window proof.
 
+**Slice 5 status:** complete — Tasks 16 and 17 shipped (commit c29204e plus the Task 17 commit on `maruina/extension-ui-policy`). Verified: `go vet ./...`, `go fix -diff ./...`, and gofmt clean; `go test -race ./...` green with the live tier skipped in `auto`; the pinned tier (`TRYGALLE_PI_BIN=<pi 1.3.0> TRYGALLE_PI_TESTS=on go test -race -count=1 ./...`) green across the whole module, including `TestLiveCompactionPromptRejectedSteerQueued`, `TestLiveCompactionOverflowMidRunDelivery`, and `TestLiveMidRunExtensionCommandHandled`.
+
+**Trigger correction (probed on pi 1.3.0):** a mid-run `compact` command is accepted, but `agent-session.js` calls `abort()` before compacting, so the run ends and queued steering is never delivered; `prompt` reports the compaction error only while `_compactionAbortController` is set, which is manual compaction. Auto compaction opened by context overflow keeps the run alive, but in that window `prompt{steer}` queues instead of failing. Task 17 therefore pins both halves live: the prompt-rejection and steer-queue half in a manual compaction window whose queued message the next run delivers, and the held-open-run half through an overflow compaction that delivers steering inside the same run. `design.md` now records the corrected fact in "Confirmed protocol facts" and the testing strategy.
+
 ### Task 16: Extension UI policy
 **Delivers:** Immediate dialog cancellation and metadata-only logging of fire-and-forget requests.
 **Blocked by:** Tasks 7, 9
 **Traces to:** R14
 **Files:** `internal/runtime/coordinator.go` (extend the existing `handleUIRequest`), `internal/runtime/ui_test.go`, `internal/runtime/ui_live_test.go`
 
-- [ ] Subscribe to UI requests: dialog methods (`select`, `confirm`, `input`, `editor`) → `AnswerUIDialog` immediately; log the method only. Fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) → log method as metadata; no delivery.
-- [ ] Unit-test with the fake client: each dialog method answered with `cancelled: true`, no content logged (assert the log record's fields), fire-and-forget not answered.
-- [ ] Live-tests (design contract test 10): `/mock-dialog` mid-run — assert the dialog is answered, the extension receives the cancellation, and the run settles without hanging; `/mock-notify` — assert a log record with the method name and no Telegram-style delivery.
-- [ ] Run `go test ./internal/...`; expect green.
-- [ ] Commit with `feat: add extension ui cancellation policy`.
+- [x] Subscribe to UI requests: dialog methods (`select`, `confirm`, `input`, `editor`) → `AnswerUIDialog` immediately; log the method only. Fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) → log method as metadata; no delivery. Verified: `handleUIRequest` already implemented the policy from Task 9; only its stale "tests land with Task 16" comment changed.
+- [x] Unit-test with the fake client: each dialog method answered with `cancelled: true`, no content logged (assert the log record's fields), fire-and-forget not answered. Verified: `ui_test.go` `TestUIDialogMethodsAnsweredCancelled` and `TestUIFireAndForgetLoggedWithoutDelivery`; the capture handler asserts one `method` field only.
+- [x] Live-tests (design contract test 10): `/mock-dialog` mid-run — assert the dialog is answered, the extension receives the cancellation, and the run settles without hanging; `/mock-notify` — assert a log record with the method name and no Telegram-style delivery. Verified against pinned pi 1.3.0: `ui_live_test.go` pins the fast `handled` response inside a 20 s caller bound (the extension's dialog timeout is 60 s), the `select` cancel log, and the settled run; `/mock-notify` pins the `notify` log and an `EmptyResponse` outcome with no delivered text. A red check with `AnswerUIDialog` removed failed at the 20 s bound.
+- [x] Run `go test ./internal/...`; expect green. Verified: `go test -race ./internal/... ./cmd/...`, the runtime live suite with `TRYGALLE_PI_BIN` on pi 1.3.0 and `TRYGALLE_PI_TESTS=on`, `go vet ./...`, `go fix -diff ./...`, gofmt clean.
+- [x] Commit with `feat: add extension ui cancellation policy`. Verified: committed.
 
 ### Task 17: Live compaction-window test
 **Delivers:** The live proof of the compaction fallback and steer-during-compaction delivery.
@@ -623,12 +637,12 @@ Delivers dialog cancellation and the live compaction-window proof.
 **Traces to:** R6, R5 (mid-run dispositions)
 **Files:** `internal/runtime/compaction_live_test.go`, `internal/harness/mockmodel.go` and `internal/harness/harness.go` (only if the context-overflow fallback is needed)
 
-- [ ] Probe one trigger before writing the test: send `client.Send(ctx, rpc.Command{Type: "compact"})` mid-run (no `Compact` builder exists; `Command` and `Client.Send` are exported and `Command` has fixed fields). If Pi 1.3.0 rejects mid-run `compact`, add `usage` chunks to the mock SSE response and a `contextWindow` to the generated `models.json` model, then trigger compaction by context overflow. Record the working trigger in the test.
-- [ ] Live-test (design contract test 2): hold a run open with a delayed mock response and trigger compaction with the recorded mechanism.
-- [ ] During compaction: send a prompt; expect the documented error; send a bare `steer`; expect `"queued"`; after compaction ends, assert the steered message is delivered and the run settles.
-- [ ] Also assert the mid-run extension-command disposition: send `/mock-run` mid-run; expect `"handled"` and immediate execution (design contract test 1, third case).
-- [ ] Run `go test ./internal/runtime/ -run Compaction`; expect the runtime-package live test to run and pass.
-- [ ] Commit with `test: pin compaction-window and mid-run disposition behavior`.
+- [x] Probe one trigger before writing the test: send `client.Send(ctx, rpc.Command{Type: "compact"})` mid-run (no `Compact` builder exists; `Command` and `Client.Send` are exported and `Command` has fixed fields). If Pi 1.3.0 rejects mid-run `compact`, add `usage` chunks to the mock SSE response and a `contextWindow` to the generated `models.json` model, then trigger compaction by context overflow. Record the working trigger in the test. Verified: pi 1.3.0 accepts mid-run `compact` (success response) but aborts the run first, so it cannot deliver queued steering; a probe of the fallback path showed the mock can answer one request with a context-overflow error instead. Both triggers are recorded in the test comments; no `usage` chunks or `contextWindow` were needed because the mock scripts an overflow error directly through the new `MockModel.OverflowOnce`.
+- [x] Live-test (design contract test 2): hold a run open with a delayed mock response and trigger compaction with the recorded mechanism. Verified: `TestLiveCompactionOverflowMidRunDelivery` holds the run open with a 3 s mock delay and a scripted overflow error, and waits on `get_state` for `isCompacting && isStreaming` so the coordinator keeps the only event-stream consumer.
+- [x] During compaction: send a prompt; expect the documented error; send a bare `steer`; expect `"queued"`; after compaction ends, assert the steered message is delivered and the run settles. Verified: `TestLiveCompactionPromptRejectedSteerQueued` pins the error, the coordinator's single bare-steer retry (log record plus `SteerAcknowledged`), the surviving queue (`pendingMessageCount == 1`), and delivery by the next run (`get_messages` contains the text, queue drains, one response). `TestLiveCompactionOverflowMidRunDelivery` pins `"queued"`, `pendingMessageCount == 1` inside the window, then delivery in the same run and one settled response. A red check with the coordinator fallback disabled failed on the missing rejection log.
+- [x] Also assert the mid-run extension-command disposition: send `/mock-run` mid-run; expect `"handled"` and immediate execution (design contract test 1, third case). Verified: `TestLiveMidRunExtensionCommandHandled` pins a `handled` response inside a bound shorter than the 3 s run delay, the `ExtensionHandled` notice, and the still-settling run.
+- [x] Run `go test ./internal/runtime/ -run Compaction`; expect the runtime-package live test to run and pass. Verified against pinned pi 1.3.0: three consecutive `-run 'Compaction|MidRunExtensionCommandHandled'` runs green, plus the whole pinned suite with `-race`.
+- [x] Commit with `test: pin compaction-window and mid-run disposition behavior`.
 
 ### Slice 6: Startup lifecycle and session resume
 Delivers the validation ladder, restart-resume behavior, and fatal exit wiring.

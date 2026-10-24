@@ -634,8 +634,8 @@ func (c *Coordinator) noteMessage(m *rpc.Message) {
 // handleUIRequest answers every blocking extension dialog immediately with
 // cancelled: true, so an ignored dialog can never block a run forever; a
 // dialog the run does not need behaves like Esc (design "Extension UI").
-// Fire-and-forget requests are logged as metadata. The dedicated policy tests
-// land with Task 16 (Slice 5).
+// Fire-and-forget requests are logged as metadata. Only the method is logged;
+// a dialog can carry sensitive content that must never reach the log.
 func (c *Coordinator) handleUIRequest(u UIRequest) {
 	switch u.Method {
 	case "select", "confirm", "input", "editor":

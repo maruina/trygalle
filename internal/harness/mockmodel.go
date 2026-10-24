@@ -34,6 +34,10 @@ const (
 	behaveFailAlways
 )
 
+// overflowErrorMessage matches a context-window overflow as Pi 1.3.0 detects it
+// from an OpenAI-compatible provider error.
+const overflowErrorMessage = "This model's maximum context length is 8000 tokens. However, your messages resulted in 9000 tokens."
+
 // RequestCapture is metadata about one model request. It records the path,
 // which header and body field names were present, and the stream flag — never
 // the request content or credential values, so captures are public-safe.
@@ -51,11 +55,12 @@ type RequestCapture struct {
 type MockModel struct {
 	ts *httptest.Server
 
-	mu       sync.Mutex
-	behavior mockBehavior
-	text     string
-	delay    time.Duration
-	requests []RequestCapture
+	mu           sync.Mutex
+	behavior     mockBehavior
+	overflowNext bool // the next request answers with a context-overflow error
+	text         string
+	delay        time.Duration
+	requests     []RequestCapture
 }
 
 // StartMockModel starts a mock model server with the default scripted text
@@ -99,6 +104,16 @@ func (m *MockModel) FailAlways() {
 	m.behavior = behaveFailAlways
 }
 
+// OverflowOnce scripts one context-overflow error for the next request. Pi
+// 1.3.0 classifies it as context overflow, compacts, and retries the turn
+// once, which is the only live path that opens a compaction window inside a
+// run (a manual compact aborts the run instead).
+func (m *MockModel) OverflowOnce() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.overflowNext = true
+}
+
 // Delay holds every response open for d before answering.
 func (m *MockModel) Delay(d time.Duration) {
 	m.mu.Lock()
@@ -124,6 +139,8 @@ func (m *MockModel) handle(w http.ResponseWriter, r *http.Request) {
 	m.capture(r, body)
 	m.mu.Lock()
 	behavior, text, delay := m.behavior, m.text, m.delay
+	overflow := m.overflowNext
+	m.overflowNext = false
 	m.mu.Unlock()
 
 	if delay > 0 {
@@ -132,6 +149,11 @@ func (m *MockModel) handle(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
+	}
+
+	if overflow {
+		writeOverflow(w)
+		return
 	}
 
 	if behavior == behaveFailAlways || behavior == behaveFailOnce && m.firstRequest() {
@@ -247,6 +269,19 @@ func writeFailure(w http.ResponseWriter) {
 		"error": map[string]any{
 			"message": "mock provider error",
 			"type":    "server_error",
+		},
+	})
+}
+
+// writeOverflow answers with the provider error shape Pi classifies as context
+// overflow: an HTTP 400 whose message matches its overflow patterns.
+func writeOverflow(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": overflowErrorMessage,
+			"type":    "invalid_request_error",
 		},
 	})
 }

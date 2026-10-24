@@ -47,7 +47,7 @@ Verified against documentation and, where noted, the installed implementation:
 - `prompt` accepts an optional `streamingBehavior` field; the value `"steer"` queues the message into an active run (implementation-verified in `rpc-mode.js`).
 - `prompt` response `data.disposition` is `"started"`, `"queued"`, or `"handled"`. `"handled"` means an extension command or input handler consumed the prompt and no run started for that prompt; an extension command may still start its own run through `pi.sendMessage()` (implementation-verified in `agent-session.js`). For Pi 1.3.0, when the awaited extension command handler directly calls `pi.sendMessage(..., { triggerTurn: true })`, `agent_start` is emitted before the `handled` response. The implementation path and a five-run live experiment verify this ordering; the contract suite must pin it. A 25 ms `setTimeout` variant emits `handled` first, so fire-and-forget work scheduled after the handler returns is outside this attribution contract.
 - `steer` and `follow_up` error when the text is an extension command (implementation-verified).
-- `prompt` throws while compaction is in progress; `steer` queues during compaction (implementation-verified).
+- `prompt` throws while manual compaction is in progress: `agent-session.js` guards on `_compactionAbortController`, which only `compact()` sets. During automatic compaction (threshold or overflow recovery) `prompt{steer}` queues like any active run. A manual `compact` command aborts the active run before compacting, so nothing consumes a steering message queued during that window until the next prompt starts a run (live-verified on Pi 1.3.0).
 - `agent_end` closes one low-level run and may be followed by retries, compaction recovery, steering, or follow-ups. `agent_settled` means Pi has no remaining automatic work.
 - `abort` aborts the current operation and responds after the session is idle. Queued steering never starts a new run: `agent_start` marks one agent-loop invocation, so a queued message either joins the aborted run's final turn and is aborted with it, or stays queued for the next prompt; either way it produces no answer (live-verified on Pi 1.3.0). Interactive Esc behavior is therefore `clear_queue` before `abort`.
 - `clear_queue` removes queued steering and follow-up messages and returns their text.
@@ -96,7 +96,7 @@ One rule, no coordinator-state branching:
 | `/abort` | `clear_queue`, then `abort`, then report dropped texts |
 | `/new` | `clear_queue`, then `new_session`; report superseded operation |
 
-`prompt{steer}` is correct in every state because Pi decides: idle runs the message (`"started"`), an active run queues it as steering (`"queued"`), and an extension command executes immediately even mid-run (`"handled"`) — the exact TUI behavior. Coordinator state is therefore not a routing input and cannot race Pi's own state. The bare-`steer` fallback exists because `prompt` rejects input during compaction while `steer` queues; delegating the queue to Pi keeps Trygalle stateless, which is why the fallback does not hold the message in Trygalle memory instead.
+`prompt{steer}` is correct in every state because Pi decides: idle runs the message (`"started"`), an active run queues it as steering (`"queued"`), and an extension command executes immediately even mid-run (`"handled"`) — the exact TUI behavior. Coordinator state is therefore not a routing input and cannot race Pi's own state. The bare-`steer` fallback exists because `prompt` rejects input during manual compaction while `steer` queues; delegating the queue to Pi keeps Trygalle stateless, which is why the fallback does not hold the message in Trygalle memory instead. Automatic compaction keeps the run active, so `prompt{steer}` queues there without the fallback.
 
 `/abort` mirrors TUI Esc exactly: `clear_queue` before `abort`, because `abort` alone does not run queued steering — it either swallows the message into the aborted turn or leaves it queued for the next prompt. The returned dropped texts are reported to the user rather than restored to an editor, because Telegram already holds them in the user's own history. The command stays named `/abort` (intent, not a TUI key); the design documents the Esc equivalence.
 
@@ -238,7 +238,7 @@ Decision: deferred, not rejected. It is experimental ("the API might still chang
 Contract tests run against a controlled Pi process (or a protocol fixture implementing the same records) with a temporary session directory:
 
 1. `prompt{steer}` dispositions in each state: idle (`"started"`), active run (`"queued"`), extension command mid-run (`"handled"` + immediate execution).
-2. Steer queued during compaction is delivered after compaction ends.
+2. Steering queued during a compaction window reaches a run: inside an automatic (overflow recovery) compaction it is delivered when the run continues, and a message queued during manual compaction is delivered by the next prompt.
 3. `clear_queue` before `abort` leaves nothing queued; `abort` alone never runs queued steering (no new `agent_start`, no assistant text).
 4. Trailing events after mid-run `new_session`; steering queue state after `clear_queue` + `new_session`.
 5. `new_session` canceled by a `session_before_switch` handler reports `cancelled` and keeps the session.

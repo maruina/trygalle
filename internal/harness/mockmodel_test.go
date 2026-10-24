@@ -124,6 +124,29 @@ func TestMockModelScriptedBehaviors(t *testing.T) {
 		}
 	})
 
+	t.Run("overflow once then succeed", func(t *testing.T) {
+		m := StartMockModel(t)
+		m.OverflowOnce()
+		resp, err := http.Post(m.URL()+"/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[],"stream":false}`))
+		if err != nil {
+			t.Fatalf("first post: %v", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read overflow response: %v", err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("overflow status = %d, want 400", resp.StatusCode)
+		}
+		if !bytes.Contains(body, []byte("maximum context length")) {
+			t.Errorf("overflow body = %s, want a context-window overflow message", body)
+		}
+		if got := postChat(t, m.URL(), `{"messages":[],"stream":false}`); !bytes.Contains(got, []byte("mock model")) {
+			t.Errorf("second response = %s, want the scripted text", got)
+		}
+	})
+
 	t.Run("fail always", func(t *testing.T) {
 		m := StartMockModel(t)
 		m.FailAlways()
