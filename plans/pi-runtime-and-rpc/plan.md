@@ -38,6 +38,11 @@
 | `go-best-practices` | `skill-loader` | Go files created or modified in Slice 4 | Loop commands own every reserved-command outcome (`cmdStatus`, `cmdAbort`, `cmdNew`); supersede suppression preserved across new operation starts until the next `agent_start`; fake-client `GetState`/`ClearQueue`/`Abort`/`NewSession` scripted like `Prompt`; `-race`, `go vet`, `go fix -diff`, gofmt clean before each Slice 4 commit |
 | `cli-best-practices` | `skill-loader` | REPL notice rendering modified | New `Status`, `AbortReport`, and `NewSessionReport` renderings stay on stdout under the existing `[trygalle]` prefix; diagnostics stay on stderr; the dev-only REPL keeps no `--json` per the plan |
 | `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to Slice 4 task status notes |
+| `resolve-worktree` | `prompt-required` | Plan path must map to its owning worktree | Located the committed plan in the main checkout; the plan worktree reported a merged slice 4 branch, so Slice 5 work moved to a fresh worktree per the user request |
+| `feature-worktree` | `prompt-required` | Slice 5 writes and commits must stay out of `main` | Created `maruina-extension-ui-policy` (branch `maruina/extension-ui-policy`) from the post-PR-#7 `origin/main` |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (new Go test files, coordinator comment) and `write` (ledger prose); no CLI, script, Terraform, or Kubernetes triggers in Task 16 |
+| `go-best-practices` | `skill-loader` | Go files created or modified in Task 16 | External `runtime_test` package asserts logged fields through a `slog.Handler` and keeps the fake client as the seam; live tests run against the pinned pi 1.3.0; `-race`, `go vet`, `go fix -diff`, gofmt clean |
+| `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to the Task 16 status notes |
 
 ---
 
@@ -611,11 +616,11 @@ Delivers dialog cancellation and the live compaction-window proof.
 **Traces to:** R14
 **Files:** `internal/runtime/coordinator.go` (extend the existing `handleUIRequest`), `internal/runtime/ui_test.go`, `internal/runtime/ui_live_test.go`
 
-- [ ] Subscribe to UI requests: dialog methods (`select`, `confirm`, `input`, `editor`) → `AnswerUIDialog` immediately; log the method only. Fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) → log method as metadata; no delivery.
-- [ ] Unit-test with the fake client: each dialog method answered with `cancelled: true`, no content logged (assert the log record's fields), fire-and-forget not answered.
-- [ ] Live-tests (design contract test 10): `/mock-dialog` mid-run — assert the dialog is answered, the extension receives the cancellation, and the run settles without hanging; `/mock-notify` — assert a log record with the method name and no Telegram-style delivery.
-- [ ] Run `go test ./internal/...`; expect green.
-- [ ] Commit with `feat: add extension ui cancellation policy`.
+- [x] Subscribe to UI requests: dialog methods (`select`, `confirm`, `input`, `editor`) → `AnswerUIDialog` immediately; log the method only. Fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) → log method as metadata; no delivery. Verified: `handleUIRequest` already implemented the policy from Task 9; only its stale "tests land with Task 16" comment changed.
+- [x] Unit-test with the fake client: each dialog method answered with `cancelled: true`, no content logged (assert the log record's fields), fire-and-forget not answered. Verified: `ui_test.go` `TestUIDialogMethodsAnsweredCancelled` and `TestUIFireAndForgetLoggedWithoutDelivery`; the capture handler asserts one `method` field only.
+- [x] Live-tests (design contract test 10): `/mock-dialog` mid-run — assert the dialog is answered, the extension receives the cancellation, and the run settles without hanging; `/mock-notify` — assert a log record with the method name and no Telegram-style delivery. Verified against pinned pi 1.3.0: `ui_live_test.go` pins the fast `handled` response inside a 20 s caller bound (the extension's dialog timeout is 60 s), the `select` cancel log, and the settled run; `/mock-notify` pins the `notify` log and an `EmptyResponse` outcome with no delivered text. A red check with `AnswerUIDialog` removed failed at the 20 s bound.
+- [x] Run `go test ./internal/...`; expect green. Verified: `go test -race ./internal/... ./cmd/...`, the runtime live suite with `TRYGALLE_PI_BIN` on pi 1.3.0 and `TRYGALLE_PI_TESTS=on`, `go vet ./...`, `go fix -diff ./...`, gofmt clean.
+- [x] Commit with `feat: add extension ui cancellation policy`. Verified: committed.
 
 ### Task 17: Live compaction-window test
 **Delivers:** The live proof of the compaction fallback and steer-during-compaction delivery.
