@@ -43,6 +43,11 @@
 | `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (new Go test files, coordinator comment) and `write` (ledger prose); no CLI, script, Terraform, or Kubernetes triggers in Task 16 |
 | `go-best-practices` | `skill-loader` | Go files created or modified in Task 16 | External `runtime_test` package asserts logged fields through a `slog.Handler` and keeps the fake client as the seam; live tests run against the pinned pi 1.3.0; `-race`, `go vet`, `go fix -diff`, gofmt clean |
 | `write` | `skill-loader` | The plan ledger is a prose artifact | Applied to the Task 16 status notes |
+| `resolve-worktree` | `prompt-required` | Task 17 plan path must map to its owning worktree | Resolved the plan in `maruina-extension-ui-policy`; every command ran there |
+| `feature-worktree` | `prompt-required` | Task 17 writes and commits must stay out of `main` | Continued in the existing slice-5 worktree on branch `maruina/extension-ui-policy` |
+| `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` and `write` for Task 17; no CLI, script, Terraform, or Kubernetes triggers |
+| `go-best-practices` | `skill-loader` | Go files created or modified in Task 17 | External `runtime_test` live tests poll `get_state` instead of taking the event stream from the coordinator; the mock keeps metadata-only captures and gains one scripted overflow response; `-race`, `go vet`, `go fix -diff`, gofmt clean |
+| `write` | `skill-loader` | The plan ledger and test comments are prose artifacts | Applied to the Task 17 status notes and the recorded trigger |
 
 ---
 
@@ -610,6 +615,10 @@ Planning evidence (Slice 4 planning, verified against the post-Slice-3 tree):
 ### Slice 5: Extension UI policy and compaction live test
 Delivers dialog cancellation and the live compaction-window proof.
 
+**Slice 5 status:** complete — Tasks 16 and 17 shipped (commit c29204e plus the Task 17 commit on `maruina/extension-ui-policy`). Verified: `go vet ./...`, `go fix -diff ./...`, and gofmt clean; `go test -race ./...` green with the live tier skipped in `auto`; the pinned tier (`TRYGALLE_PI_BIN=<pi 1.3.0> TRYGALLE_PI_TESTS=on go test -race -count=1 ./...`) green across the whole module, including `TestLiveCompactionPromptRejectedSteerQueued`, `TestLiveCompactionOverflowMidRunDelivery`, and `TestLiveMidRunExtensionCommandHandled`.
+
+**Trigger correction (probed on pi 1.3.0):** a mid-run `compact` command is accepted, but `agent-session.js` calls `abort()` before compacting, so the run ends and queued steering is never delivered; `prompt` reports the compaction error only while `_compactionAbortController` is set, which is manual compaction. Auto compaction opened by context overflow keeps the run alive, but in that window `prompt{steer}` queues instead of failing. Task 17 therefore pins both halves live: the prompt-rejection and steer-queue half in a manual compaction window whose queued message the next run delivers, and the held-open-run half through an overflow compaction that delivers steering inside the same run.
+
 ### Task 16: Extension UI policy
 **Delivers:** Immediate dialog cancellation and metadata-only logging of fire-and-forget requests.
 **Blocked by:** Tasks 7, 9
@@ -628,12 +637,12 @@ Delivers dialog cancellation and the live compaction-window proof.
 **Traces to:** R6, R5 (mid-run dispositions)
 **Files:** `internal/runtime/compaction_live_test.go`, `internal/harness/mockmodel.go` and `internal/harness/harness.go` (only if the context-overflow fallback is needed)
 
-- [ ] Probe one trigger before writing the test: send `client.Send(ctx, rpc.Command{Type: "compact"})` mid-run (no `Compact` builder exists; `Command` and `Client.Send` are exported and `Command` has fixed fields). If Pi 1.3.0 rejects mid-run `compact`, add `usage` chunks to the mock SSE response and a `contextWindow` to the generated `models.json` model, then trigger compaction by context overflow. Record the working trigger in the test.
-- [ ] Live-test (design contract test 2): hold a run open with a delayed mock response and trigger compaction with the recorded mechanism.
-- [ ] During compaction: send a prompt; expect the documented error; send a bare `steer`; expect `"queued"`; after compaction ends, assert the steered message is delivered and the run settles.
-- [ ] Also assert the mid-run extension-command disposition: send `/mock-run` mid-run; expect `"handled"` and immediate execution (design contract test 1, third case).
-- [ ] Run `go test ./internal/runtime/ -run Compaction`; expect the runtime-package live test to run and pass.
-- [ ] Commit with `test: pin compaction-window and mid-run disposition behavior`.
+- [x] Probe one trigger before writing the test: send `client.Send(ctx, rpc.Command{Type: "compact"})` mid-run (no `Compact` builder exists; `Command` and `Client.Send` are exported and `Command` has fixed fields). If Pi 1.3.0 rejects mid-run `compact`, add `usage` chunks to the mock SSE response and a `contextWindow` to the generated `models.json` model, then trigger compaction by context overflow. Record the working trigger in the test. Verified: pi 1.3.0 accepts mid-run `compact` (success response) but aborts the run first, so it cannot deliver queued steering; a probe of the fallback path showed the mock can answer one request with a context-overflow error instead. Both triggers are recorded in the test comments; no `usage` chunks or `contextWindow` were needed because the mock scripts an overflow error directly through the new `MockModel.OverflowOnce`.
+- [x] Live-test (design contract test 2): hold a run open with a delayed mock response and trigger compaction with the recorded mechanism. Verified: `TestLiveCompactionOverflowMidRunDelivery` holds the run open with a 3 s mock delay and a scripted overflow error, and waits on `get_state` for `isCompacting && isStreaming` so the coordinator keeps the only event-stream consumer.
+- [x] During compaction: send a prompt; expect the documented error; send a bare `steer`; expect `"queued"`; after compaction ends, assert the steered message is delivered and the run settles. Verified: `TestLiveCompactionPromptRejectedSteerQueued` pins the error, the coordinator's single bare-steer retry (log record plus `SteerAcknowledged`), the surviving queue (`pendingMessageCount == 1`), and delivery by the next run (`get_messages` contains the text, queue drains, one response). `TestLiveCompactionOverflowMidRunDelivery` pins `"queued"`, `pendingMessageCount == 1` inside the window, then delivery in the same run and one settled response. A red check with the coordinator fallback disabled failed on the missing rejection log.
+- [x] Also assert the mid-run extension-command disposition: send `/mock-run` mid-run; expect `"handled"` and immediate execution (design contract test 1, third case). Verified: `TestLiveMidRunExtensionCommandHandled` pins a `handled` response inside a bound shorter than the 3 s run delay, the `ExtensionHandled` notice, and the still-settling run.
+- [x] Run `go test ./internal/runtime/ -run Compaction`; expect the runtime-package live test to run and pass. Verified against pinned pi 1.3.0: three consecutive `-run 'Compaction|MidRunExtensionCommandHandled'` runs green, plus the whole pinned suite with `-race`.
+- [x] Commit with `test: pin compaction-window and mid-run disposition behavior`.
 
 ### Slice 6: Startup lifecycle and session resume
 Delivers the validation ladder, restart-resume behavior, and fatal exit wiring.
