@@ -166,9 +166,9 @@ func TestLiveResumePartialTrailingLine(t *testing.T) {
 
 // TestLiveResumeUnreadableSessionFile pins resume scenario (d): a wholly
 // unreadable session file in the directory does not block startup. Pi excludes
-// it from discovery and starts a fresh session on the first boot (design
-// contract test 6d, R15); the degraded ladder is the alternative bound, so the
-// test accepts either path with a session id and records which one ran.
+// it from discovery and starts a fresh session on the first boot without a
+// degraded restart (design contract test 6d, R15); the degraded ladder branch
+// of the plan's disjunction stays unit-pinned by the Task 18 ladder tests.
 func TestLiveResumeUnreadableSessionFile(t *testing.T) {
 	bin := harness.Pi(t)
 	sessionDir := t.TempDir()
@@ -187,23 +187,19 @@ func TestLiveResumeUnreadableSessionFile(t *testing.T) {
 	if state.SessionID == "" {
 		t.Fatal("get_state reports no session id with an unreadable session file")
 	}
-	degraded := false
 	select {
 	case notice := <-n.notices:
-		if notice.Kind != runtime.NoticeSessionResumeFailed {
-			t.Errorf("unexpected notice %q with an unreadable session file", notice.Kind)
-		}
-		degraded = true // the ladder bounded the failure to one fresh restart
+		t.Errorf("unexpected notice %q; an unreadable session file must not degrade the start", notice.Kind)
 	default:
-	}
-	if degraded && state.SessionID == "" {
-		t.Fatal("the degraded fresh-session restart reported no session id")
 	}
 }
 
 // TestLiveKillMidSessionIsFatal pins R16 against the real Pi: a pi process
 // killed mid-session surfaces a fatal error through the coordinator, and no
-// settlement outcome leaks from the dead run.
+// settlement outcome leaks from the dead run. The probe inputs sent after the
+// kill route their own failure (RoutingFailure, the dead child's transport
+// error); that routing notice is not a settlement of the killed run, so only
+// settlement outcomes are rejected below.
 func TestLiveKillMidSessionIsFatal(t *testing.T) {
 	bin := harness.Pi(t)
 	model := harness.StartMockModel(t)
@@ -226,11 +222,18 @@ func TestLiveKillMidSessionIsFatal(t *testing.T) {
 	if err := c.Wait(); err == nil {
 		t.Fatal("coordinator Wait = nil after the mid-session kill, want fatal")
 	}
-	select {
-	case text := <-n.responses:
-		t.Errorf("unexpected response %q after the kill", text)
-	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q after the kill", notice.Kind)
-	case <-time.After(100 * time.Millisecond):
+	// The fatal error ends the loop, so every notice it emitted is already
+	// buffered: drain without a timeout instead of racing the scheduler.
+	for {
+		select {
+		case text := <-n.responses:
+			t.Errorf("unexpected response %q after the kill", text)
+		case notice := <-n.notices:
+			if notice.Kind != runtime.NoticeRoutingFailure {
+				t.Errorf("unexpected notice %q after the kill", notice.Kind)
+			}
+		default:
+			return
+		}
 	}
 }

@@ -141,7 +141,6 @@ func (c *startClient) Wait() error {
 // Pi child may own the session directory at a time.
 type startScript struct {
 	children []*startClient
-	failAt   map[int]error // start call index (0-based) -> start error
 
 	starts   int
 	argsSeen [][]string
@@ -154,9 +153,6 @@ func (s *startScript) start(t *testing.T) runtime.StartFunc {
 		i := s.starts
 		s.starts++
 		s.argsSeen = append(s.argsSeen, args)
-		if err, ok := s.failAt[i]; ok {
-			return nil, err
-		}
 		if i > 0 {
 			prev := s.children[i-1]
 			select {
@@ -342,13 +338,19 @@ func TestStartupHungChildKilledBeforeRetry(t *testing.T) {
 func TestProtocolErrorWhileIdleIsFatal(t *testing.T) {
 	f := newFakeClient()
 	n := newRecordingNotifier()
+	// A routed submission must start cleanly, so the only outcome left for
+	// the probes is the protocol failure: with the zero-value disposition the
+	// probe would instead end with an unexpected-disposition error and the
+	// fatal wiring would never run.
+	f.promptDisposition = rpc.DispositionStarted
 	f.waitErr = &rpc.ProtocolError{Err: errors.New("garbage record")}
 	c := newTestCoordinator(t, f, n)
 	defer c.Close()
 
 	f.die()
-	if err := handleInputUntilFatal(t, c, "hi"); err == nil {
-		t.Fatal("HandleUserInput after a protocol integrity failure = nil error, want fatal")
+	err := handleInputUntilFatal(t, c, "hi")
+	if _, ok := errors.AsType[*rpc.ProtocolError](err); !ok {
+		t.Fatalf("HandleUserInput after a protocol integrity failure = %v, want the wrapped rpc.ProtocolError", err)
 	}
 }
 
@@ -361,8 +363,9 @@ func TestProtocolErrorWhileRunningIsFatal(t *testing.T) {
 	startRunningOperation(t, f, c)
 
 	f.die()
-	if err := handleInputUntilFatal(t, c, "second"); err == nil {
-		t.Fatal("HandleUserInput during a run after a protocol integrity failure = nil error, want fatal")
+	err := handleInputUntilFatal(t, c, "second")
+	if _, ok := errors.AsType[*rpc.ProtocolError](err); !ok {
+		t.Fatalf("HandleUserInput during a run after a protocol integrity failure = %v, want the wrapped rpc.ProtocolError", err)
 	}
 	// A dead protocol produces no settlement outcome.
 	select {
