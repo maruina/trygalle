@@ -334,3 +334,42 @@ func TestStartupHungChildKilledBeforeRetry(t *testing.T) {
 		t.Error("the hung child had not exited when the retry started")
 	}
 }
+
+// TestProtocolErrorWhileIdleIsFatal pins the coordinator fatal wiring for a
+// protocol integrity failure (R16): the client's cached terminal condition is
+// the runtime's fatal error, distinct from a pi parse response, which the rpc
+// client logs without dying (TestParseResponseLoggedNotFatal).
+func TestProtocolErrorWhileIdleIsFatal(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.waitErr = &rpc.ProtocolError{Err: errors.New("garbage record")}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	f.die()
+	if err := handleInputUntilFatal(t, c, "hi"); err == nil {
+		t.Fatal("HandleUserInput after a protocol integrity failure = nil error, want fatal")
+	}
+}
+
+func TestProtocolErrorWhileRunningIsFatal(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.waitErr = &rpc.ProtocolError{Err: errors.New("garbage record")}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	f.die()
+	if err := handleInputUntilFatal(t, c, "second"); err == nil {
+		t.Fatal("HandleUserInput during a run after a protocol integrity failure = nil error, want fatal")
+	}
+	// A dead protocol produces no settlement outcome.
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q after the protocol integrity failure", text)
+	case notice := <-n.notices:
+		t.Errorf("unexpected notice %q after the protocol integrity failure", notice.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
