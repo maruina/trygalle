@@ -215,6 +215,18 @@ func TestRenderNoticeNewSessionReport(t *testing.T) {
 	}
 }
 
+func TestRenderNoticeSessionResumeFailed(t *testing.T) {
+	got := renderNotice(runtime.Notice{
+		Kind: runtime.NoticeSessionResumeFailed,
+		Text: "get_state: boom",
+	})
+	for _, want := range []string{"session resume failed", "fresh conversation", "get_state: boom"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderNotice(SessionResumeFailed) = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
 func TestBuildArgs(t *testing.T) {
 	if got := buildArgs(false, "/data/s"); strings.Join(got, " ") != "--mode rpc --continue --session-dir /data/s" {
 		t.Errorf("buildArgs(false) = %v", got)

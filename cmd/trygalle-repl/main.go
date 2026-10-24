@@ -118,9 +118,14 @@ func command(argv []string, stdin io.ReadCloser, stdout, stderr io.Writer) error
 	cfg.ShutdownTimeout = *shutdown
 
 	log := slog.New(slog.NewTextHandler(stderr, nil))
-	client, err := rpc.New(cfg.PiBin, cfg.Args, rpc.WithLogger(log))
+	start := func(args []string) (runtime.PiClient, error) {
+		return rpc.New(cfg.PiBin, args, rpc.WithLogger(log))
+	}
+	// The startup validation ladder owns retries and the degraded fresh
+	// session (R15); a fatal startup returns here and exits 1.
+	client, err := runtime.Start(context.Background(), start, stdoutNotifier{w: stdout}, cfg, log)
 	if err != nil {
-		return fmt.Errorf("start pi: %w", err)
+		return fmt.Errorf("pi startup: %w", err)
 	}
 	coord := runtime.NewCoordinator(client, stdoutNotifier{w: stdout}, cfg, log)
 
@@ -235,7 +240,7 @@ func handleInputLine(ctx context.Context, handler inputHandler, line string) err
 
 // waitPiExit waits for pi's orderly exit up to the shutdown deadline, killing
 // the child only after it misses the deadline (design "Shutdown").
-func waitPiExit(client *rpc.Client, timeout time.Duration, log *slog.Logger) {
+func waitPiExit(client runtime.PiClient, timeout time.Duration, log *slog.Logger) {
 	done := make(chan error, 1)
 	go func() { done <- client.Wait() }()
 	timer := time.NewTimer(timeout)
@@ -325,6 +330,8 @@ func renderNotice(n runtime.Notice) string {
 			text += fmt.Sprintf("; dropped follow-up: %q", n.Dropped.FollowUp)
 		}
 		return text
+	case runtime.NoticeSessionResumeFailed:
+		text = "session resume failed; started a fresh conversation: " + n.Text
 	default:
 		text = string(n.Kind)
 	}
