@@ -56,6 +56,7 @@ var (
 	errCoordinatorClosed = errors.New("coordinator is stopped")
 	errInputInFlight     = errors.New("another input is already in flight")
 	errNoPendingInput    = errors.New("no input in flight")
+	errReservedInFlight  = errors.New("a reserved command is already in flight")
 )
 
 // cmdKind discriminates the internal command channel from HandleUserInput to
@@ -64,14 +65,21 @@ var (
 type cmdKind int
 
 const (
-	cmdBegin  cmdKind = iota // an input is about to be submitted to Pi
-	cmdResult                // the RPC outcome of a submission
+	cmdBegin   cmdKind = iota // an input is about to be submitted to Pi
+	cmdResult                 // the RPC outcome of a submission
+	cmdStatus                 // a /status query outcome; read-only, no operation state
+	cmdAbort                  // a /abort sequence outcome; terminates the running operation
+	cmdNew                    // a /new sequence outcome; supersedes the running operation
+	cmdReserve                // opens the reserved-command window the caller's RPC sequence runs in
 )
 
 type coordCommand struct {
 	kind        cmdKind
 	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
+	status      State         // the /status query outcome for cmdStatus
+	dropped     QueueContents // the clear_queue outcome for cmdAbort and cmdNew
+	cancelled   bool          // the new_session outcome for cmdNew
 	err         error
 	ack         chan error
 }
@@ -100,11 +108,20 @@ type Coordinator struct {
 	// readers that observed done closed can read it safely.
 	fatalError error
 
-	// op, pending, state, and the heartbeat ticker are owned by the event
-	// loop goroutine.
+	// op, pending, state, the reserved-command window, and the heartbeat
+	// ticker are owned by the event loop goroutine.
 	op      *operation // the running operation, non-nil while stateRunning
 	pending *operation // a submit between the begin and result handshakes
 	state   opState
+
+	// reserved is set from the reserve command until the /abort or /new
+	// outcome arrives, that is, while the caller runs its RPC sequence. A run
+	// that settles inside the window has its terminal outcome deferred, so the
+	// reserved command's report is the operation's single terminal outcome
+	// (design "Terminal states").
+	reserved      bool
+	reservedHadOp bool       // an operation was active when the window opened
+	deferred      *operation // the operation that settled inside the window
 
 	hbTicker *time.Ticker // non-nil while an operation runs
 	hbC      <-chan time.Time
@@ -135,16 +152,27 @@ func (c *Coordinator) Close() {
 }
 
 // Done closes when the coordinator stops.
-// HandleUserInput routes one user input. Reserved commands are recognized but
-// routed in Slice 4; everything else goes to prompt with streamingBehavior
+// HandleUserInput routes one user input. /status runs a read-only get_state
+// query; /abort runs clear_queue then abort; /new runs clear_queue then
+// new_session and supersedes the active run; everything
+// else goes to prompt with streamingBehavior
 // "steer", in every state: Pi decides between started, queued, and handled
 // because Pi is the authority on run state. The method returns after the RPC
 // response, or with the coordinator's fatal error once Pi is unusable.
 func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
+	if text == "/status" {
+		return c.handleStatusRequest(ctx)
+	}
+	if text == "/abort" {
+		return c.handleAbortRequest(ctx)
+	}
+	if text == "/new" {
+		return c.handleNewRequest(ctx)
+	}
 	if isReservedCommand(text) {
-		// Reserved commands never reach prompt{steer}. Their routing
-		// (/status, /abort, /new) lands in Slice 4.
-		c.log.Info("reserved command; routing lands in slice 4", "kind", text)
+		// Defensive: every reserved name routes above. This branch only
+		// fires if a new reserved name is added to the classifier first.
+		c.log.Info("reserved command routed above", "kind", text)
 		return nil
 	}
 
@@ -218,6 +246,88 @@ func (c *Coordinator) terminalError() error {
 	return errCoordinatorClosed
 }
 
+// handleAbortRequest routes /abort with Esc parity: open the reserved-command
+// window, clear the steering queue before aborting the run, then post the
+// sequence outcome so the loop alone emits the AbortReport as the operation's
+// single terminal outcome (R12). An idle /abort still runs the sequence,
+// mirroring Esc on an idle session.
+func (c *Coordinator) handleAbortRequest(ctx context.Context) error {
+	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve}); err != nil {
+		return c.closeAbandonedWindow(ctx, err, cmdAbort)
+	}
+	dropped, err := c.clearQueueAndAbort(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdAbort, dropped: dropped, err: err})
+}
+
+// closeAbandonedWindow closes the reserved-command window when the caller gave
+// up after the reserve may have reached the loop. The outcome command carries
+// the cancellation, so the window never strands the suppression it owns.
+func (c *Coordinator) closeAbandonedWindow(ctx context.Context, err error, kind cmdKind) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	_ = c.sendCommand(context.Background(), coordCommand{kind: kind, err: err})
+	return err
+}
+
+// clearQueueAndAbort runs the Esc-parity sequence: drain queued steering and
+// follow-up messages first so nothing survives the abort, then abort the
+// run. It short-circuits on the first failure; the loop reports it and the
+// operation (if any) keeps running so its settle is still attributed.
+func (c *Coordinator) clearQueueAndAbort(ctx context.Context) (QueueContents, error) {
+	dropped, err := c.client.ClearQueue(ctx)
+	if err != nil {
+		return QueueContents{}, err
+	}
+	if err := c.client.Abort(ctx); err != nil {
+		return dropped, err
+	}
+	return dropped, nil
+}
+
+// handleNewRequest routes /new with immediate-execution semantics: clear the
+// steering queue, then switch to a new session, then post the sequence
+// outcome so the loop alone owns the supersede transition (R13).
+func (c *Coordinator) handleNewRequest(ctx context.Context) error {
+	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve}); err != nil {
+		return c.closeAbandonedWindow(ctx, err, cmdNew)
+	}
+	dropped, cancelled, err := c.clearQueueAndNewSession(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdNew, dropped: dropped, cancelled: cancelled, err: err})
+}
+
+// clearQueueAndNewSession runs the immediate-execution sequence: drain queued
+// steering and follow-up messages first so nothing survives the switch, then
+// start a new session (an extension handler can still cancel it). It
+// short-circuits on the first failure; the loop reports it and the operation
+// (if any) keeps running so its settle is still attributed.
+func (c *Coordinator) clearQueueAndNewSession(ctx context.Context) (QueueContents, bool, error) {
+	dropped, err := c.client.ClearQueue(ctx)
+	if err != nil {
+		return QueueContents{}, false, err
+	}
+	cancelled, err := c.client.NewSession(ctx)
+	if err != nil {
+		return dropped, false, err
+	}
+	return dropped, cancelled, nil
+}
+
+// handleStatusRequest routes /status: a read-only get_state query whose
+// outcome the loop reports as a Status notice. It never touches operation
+// state and uses no begin/result handshake, so it routes while a run is
+// active without disturbing it (R11).
+func (c *Coordinator) handleStatusRequest(ctx context.Context) error {
+	state, err := c.client.GetState(ctx)
+	// The handoff uses a coordinator-owned context so a caller that gave up
+	// still leaves a visible outcome, mirroring the prompt result handshake.
+	return c.sendCommand(context.Background(), coordCommand{kind: cmdStatus, status: state, err: err})
+}
+
 // isReservedCommand reports whether text is one of the exact-match reserved
 // command names (plan "REPL entry seam").
 func isReservedCommand(text string) bool {
@@ -249,6 +359,14 @@ func (c *Coordinator) loop() {
 				c.handleBegin(cmd)
 			case cmdResult:
 				c.handleResult(cmd)
+			case cmdStatus:
+				c.handleStatus(cmd)
+			case cmdAbort:
+				c.handleAbort(cmd)
+			case cmdNew:
+				c.handleNew(cmd)
+			case cmdReserve:
+				c.handleReserve(cmd)
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)
@@ -282,6 +400,43 @@ func (c *Coordinator) fail(err error) {
 	c.log.Error("coordinator fatal", "error", err)
 }
 
+// handleReserve opens the reserved-command window and records whether an
+// operation was active when it opened, which is what the /abort report needs
+// when the operation settles inside the window.
+func (c *Coordinator) handleReserve(cmd coordCommand) {
+	if c.reserved {
+		cmd.ack <- errReservedInFlight
+		return
+	}
+	c.reserved = true
+	c.reservedHadOp = c.op != nil
+	cmd.ack <- nil
+}
+
+// flushDeferred delivers the terminal outcome of an operation that settled
+// inside a reserved-command window. It runs only when that command was
+// canceled or failed, so the run's answer is never lost.
+func (c *Coordinator) flushDeferred() {
+	op := c.deferred
+	if op == nil {
+		return
+	}
+	c.deferred = nil
+	c.state = stateIdle
+	c.log.Info("delivering the outcome deferred by a reserved command")
+	c.settleOperation(op)
+}
+
+// discardDeferred drops the deferred outcome after a reserved command
+// completed: its report is the operation's single terminal outcome.
+func (c *Coordinator) discardDeferred() {
+	if c.deferred == nil {
+		return
+	}
+	c.deferred = nil
+	c.log.Info("discarding the outcome replaced by a reserved command")
+}
+
 func (c *Coordinator) handleBegin(cmd coordCommand) {
 	if c.pending != nil {
 		cmd.ack <- errInputInFlight
@@ -310,6 +465,9 @@ func (c *Coordinator) drainEvents() {
 // startOperation promotes the pending submit into the tracked operation. It
 // reports false when an operation already runs (Pi would have queued, not
 // started); the caller still gets a clean ack and the state stays honest.
+// A post-/new suppression survives a new operation start: only the next
+// agent_start re-arms attribution, so a late settle from the superseded run
+// can never complete the new operation (R13).
 func (c *Coordinator) startOperation(pending *operation) bool {
 	if c.op != nil {
 		c.log.Error("prompt started a second run while an operation is running")
@@ -317,7 +475,9 @@ func (c *Coordinator) startOperation(pending *operation) bool {
 	}
 	pending.startedAt = time.Now()
 	c.op = pending
-	c.state = stateRunning
+	if c.state != stateSuperseded {
+		c.state = stateRunning
+	}
 	c.startHeartbeat()
 	c.log.Info("operation started")
 	return true
@@ -374,7 +534,16 @@ func (c *Coordinator) lastAssistantText() (*string, error) {
 // handleEvent classifies one session event. Attribution rule: events attach
 // to the running operation, else to the pending submit, else they are logged
 // as unassociated and never attributed (design "Operation state machine").
+// After /new supersedes the session or /abort ends the operation, trailing
+// events from that run are dropped until the next agent_start re-arms
+// attribution (R12, R13).
 func (c *Coordinator) handleEvent(e Event) {
+	if c.state == stateSuperseded && !c.endSupersede(e) {
+		// A late settle from the superseded run can never complete a later
+		// input: it is logged with its type and dropped here.
+		c.log.Debug("trailing event after supersede", "type", e.Type)
+		return
+	}
 	switch e.Type {
 	case eventAgentStart:
 		c.noteAgentStart()
@@ -395,6 +564,23 @@ func (c *Coordinator) handleEvent(e Event) {
 	}
 }
 
+// endSupersede reports whether e ends the post-terminal trailing-event
+// suppression. Only the next agent_start re-arms attribution: it must belong
+// to a new run because the superseded or aborted run already started. The
+// start itself is still processed normally so an extension run that begins
+// right after a reserved command keeps its attribution.
+func (c *Coordinator) endSupersede(e Event) bool {
+	if e.Type != eventAgentStart {
+		return false
+	}
+	if c.op != nil {
+		c.state = stateRunning
+	} else {
+		c.state = stateIdle
+	}
+	return true
+}
+
 func (c *Coordinator) noteAgentStart() {
 	switch {
 	case c.op != nil:
@@ -408,6 +594,15 @@ func (c *Coordinator) noteAgentStart() {
 
 func (c *Coordinator) noteSettled() {
 	switch {
+	case c.op != nil && c.reserved:
+		// The run settled while a reserved command sequence was in flight: the
+		// reserved report becomes the single terminal outcome, so this one is
+		// held for the outcome command to discard or flush.
+		c.deferred = c.op
+		c.op = nil
+		c.state = stateSuperseded
+		c.stopHeartbeat()
+		c.log.Info("operation settled during a reserved command; outcome deferred")
 	case c.op != nil:
 		c.settleCurrentOperation()
 	case c.pending != nil:

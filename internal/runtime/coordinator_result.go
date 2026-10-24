@@ -36,6 +36,90 @@ func (c *Coordinator) handlePromptFailure(cmd coordCommand) {
 	cmd.ack <- nil
 }
 
+// handleAbort reports one /abort sequence outcome as a loop-owned notice.
+// A failed sequence is a routing failure and the operation (if any) keeps
+// running so its settle is still attributed.
+//
+// The reserved-command window decides attribution: an operation that settled
+// while the sequence ran was deferred, so the AbortReport is the operation's
+// single terminal outcome. The report names the no-operation case only when no
+// operation was active when /abort opened the window. The window suppresses
+// trailing events until the next agent_start, so a late settle from the
+// aborted run can never complete a later input.
+func (c *Coordinator) handleAbort(cmd coordCommand) {
+	hadOp := c.reservedHadOp
+	c.reserved = false
+	c.reservedHadOp = false
+	if cmd.err != nil {
+		c.flushDeferred()
+		c.log.Error("abort sequence failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+		cmd.ack <- nil
+		return
+	}
+	c.discardDeferred()
+	if !hadOp {
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Text: "no operation was active", Dropped: cmd.dropped})
+	} else {
+		c.op = nil
+		c.state = stateSuperseded
+		c.stopHeartbeat()
+		c.log.Info("operation aborted")
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeAbortReport, Dropped: cmd.dropped})
+	}
+	cmd.ack <- nil
+}
+
+// handleNew reports one /new sequence outcome as a loop-owned notice. A
+// failed sequence is a routing failure and the operation (if any) keeps
+// running so its settle is still attributed. A cancelled switch keeps the
+// current session (and its active run); the queue was still cleared, so the
+// report carries both, and an operation that settled inside the window is
+// flushed so its answer is not lost. A completed switch supersedes the
+// running operation: the report is its single terminal outcome (any deferred
+// one is dropped) and trailing old-run events stay suppressed until the next
+// agent_start (see handleEvent).
+func (c *Coordinator) handleNew(cmd coordCommand) {
+	c.reserved = false
+	c.reservedHadOp = false
+	if cmd.err != nil {
+		c.flushDeferred()
+		c.log.Error("new session sequence failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+		cmd.ack <- nil
+		return
+	}
+	if cmd.cancelled {
+		c.flushDeferred()
+		c.log.Info("new session cancelled; keeping current session")
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeNewSessionReport, Text: "session switch cancelled", Dropped: cmd.dropped})
+		cmd.ack <- nil
+		return
+	}
+	c.discardDeferred()
+	c.op = nil
+	c.state = stateSuperseded
+	c.stopHeartbeat()
+	c.log.Info("session superseded")
+	c.notifier.Notice(context.Background(), Notice{Kind: NoticeNewSessionReport, Dropped: cmd.dropped})
+	cmd.ack <- nil
+}
+
+// handleStatus reports one /status query outcome as a loop-owned notice. A
+// failed get_state is a routing failure with the failure cause, mirroring
+// the prompt-failure pattern; neither path is silent. The query never touches
+// operation state: status observes the run without disturbing it (R11).
+func (c *Coordinator) handleStatus(cmd coordCommand) {
+	if cmd.err != nil {
+		c.log.Error("get_state failed", "error", cmd.err)
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
+	} else {
+		state := cmd.status
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeStatus, State: &state})
+	}
+	cmd.ack <- nil
+}
+
 func (c *Coordinator) handleStarted(pending *operation, cmd coordCommand) {
 	if !c.startOperation(pending) {
 		cmd.ack <- nil

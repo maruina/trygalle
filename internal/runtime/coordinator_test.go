@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"slices"
@@ -14,6 +15,15 @@ import (
 	"github.com/maruina/trygalle/internal/runtime"
 )
 
+// errFakeGetState scripts a get_state failure for the status error path.
+var errFakeGetState = errors.New("fake get_state failure")
+
+// errFakeAbort scripts an abort-sequence failure.
+var errFakeAbort = errors.New("fake abort failure")
+
+// errFakeNewSession scripts a new-session-sequence failure.
+var errFakeNewSession = errors.New("fake new_session failure")
+
 // fakeClient is a scripted PiClient: the test sets the canned results, and the
 // fake records the commands the coordinator routes. It implements the record
 // seams; it does not reimplement Pi behavior.
@@ -25,12 +35,26 @@ type fakeClient struct {
 	promptScript []scriptedPrompt
 	// onPrompt and onSteer run before the canned result returns, letting a
 	// test play the events Pi emits while producing the response.
-	onPrompt         func()
-	onSteer          func()
-	steerDisposition rpc.Disposition
-	steerErr         error
-	text             *string
-	textErr          error
+	onPrompt            func()
+	onSteer             func()
+	steerDisposition    rpc.Disposition
+	steerErr            error
+	text                *string
+	textErr             error
+	state               rpc.State
+	stateErr            error
+	queue               rpc.QueueContents
+	clearQueueErr       error
+	abortErr            error
+	newSessionCancelled bool
+	newSessionErr       error
+
+	// onClearQueue, onAbort, and onNewSession run before the canned result
+	// returns, letting a test play the events Pi emits during a reserved
+	// command sequence.
+	onClearQueue func()
+	onAbort      func()
+	onNewSession func()
 
 	// events carries the state events the test plays. An event pushed before
 	// the canned prompt response returns matches the wire-order guarantee the
@@ -54,6 +78,7 @@ func newFakeClient() *fakeClient {
 		events: make(chan rpc.Event, 64),
 		ui:     make(chan rpc.UIRequest, 16),
 		died:   make(chan struct{}),
+		state:  rpc.State{SessionID: "s-1"},
 	}
 }
 
@@ -102,7 +127,7 @@ func (f *fakeClient) Steer(ctx context.Context, message string) (rpc.Disposition
 
 func (f *fakeClient) GetState(ctx context.Context) (rpc.State, error) {
 	f.record("get_state")
-	return rpc.State{SessionID: "s-1"}, nil
+	return f.state, f.stateErr
 }
 
 func (f *fakeClient) GetCommands(ctx context.Context) ([]rpc.CommandInfo, error) {
@@ -112,17 +137,26 @@ func (f *fakeClient) GetCommands(ctx context.Context) ([]rpc.CommandInfo, error)
 
 func (f *fakeClient) Abort(ctx context.Context) error {
 	f.record("abort")
-	return nil
+	if f.onAbort != nil {
+		f.onAbort()
+	}
+	return f.abortErr
 }
 
 func (f *fakeClient) ClearQueue(ctx context.Context) (rpc.QueueContents, error) {
 	f.record("clear_queue")
-	return rpc.QueueContents{}, nil
+	if f.onClearQueue != nil {
+		f.onClearQueue()
+	}
+	return f.queue, f.clearQueueErr
 }
 
 func (f *fakeClient) NewSession(ctx context.Context) (bool, error) {
 	f.record("new_session")
-	return false, nil
+	if f.onNewSession != nil {
+		f.onNewSession()
+	}
+	return f.newSessionCancelled, f.newSessionErr
 }
 
 func (f *fakeClient) GetLastAssistantText(ctx context.Context) (*string, error) {
@@ -161,6 +195,11 @@ func (f *fakeClient) Wait() error {
 }
 
 func (f *fakeClient) die() { close(f.died) }
+
+// useUnbufferedEvents makes the event channel unbuffered, so a test that plays
+// an event from an RPC hook knows the loop received it before the RPC returns.
+// It must run before the coordinator starts.
+func (f *fakeClient) useUnbufferedEvents() { f.events = make(chan rpc.Event) }
 
 // recordingNotifier collects responses and notices on buffered channels so the
 // coordinator event loop never blocks on delivery.
@@ -214,6 +253,28 @@ func (n *recordingNotifier) waitForNotice(t *testing.T, kind runtime.NoticeKind)
 			return runtime.Notice{}
 		}
 	}
+}
+
+// waitForResponseAndNotice consumes one response and one notice in either
+// order. The coordinator delivers a deferred run outcome before the reserved
+// command's report, but responses and notices are recorded on separate
+// channels, so a select cannot rely on that delivery order.
+func (n *recordingNotifier) waitForResponseAndNotice(t *testing.T) (string, runtime.Notice) {
+	t.Helper()
+	var text string
+	var notice runtime.Notice
+	var haveText, haveNotice bool
+	for !haveText || !haveNotice {
+		select {
+		case text = <-n.responses:
+			haveText = true
+		case notice = <-n.notices:
+			haveNotice = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing outcome: response=%t notice=%t", haveText, haveNotice)
+		}
+	}
+	return text, notice
 }
 
 func newTestCoordinator(t *testing.T, f *fakeClient, n *recordingNotifier) *runtime.Coordinator {
@@ -572,8 +633,8 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 	defer c.Close()
 	startRunningOperation(t, f, c)
 
-	// While the run is active, a second prompt steers and the reserved names
-	// route, without spawning a second event consumer.
+	// While the run is active, a second prompt steers and /status routes,
+	// without spawning a second event consumer.
 	f.promptScript = []scriptedPrompt{
 		{disposition: rpc.DispositionQueued},
 	}
@@ -581,11 +642,15 @@ func TestSecondPromptRoutesWhileFirstActive(t *testing.T) {
 		t.Fatalf("HandleUserInput while active: %v", err)
 	}
 	n.waitForNotice(t, runtime.NoticeSteerAcknowledged)
-	for _, cmd := range []string{"/status", "/abort", "/new"} {
-		if err := c.HandleUserInput(context.Background(), cmd); err != nil {
-			t.Errorf("%s while active: %v", cmd, err)
-		}
+	// /status reports without disturbing the run; /new still stubs out to
+	// Task 15. /abort now terminates the run (covered by the abort tests),
+	// so it no longer belongs in this settle-normally flow.
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("/status while active: %v", err)
 	}
+	n.waitForNotice(t, runtime.NoticeStatus)
+	// /abort now terminates the run and /new supersedes it (both covered by
+	// their own tests), so neither belongs in this settle-normally flow.
 
 	// The first run still settles normally afterwards.
 	f.events <- rpc.Event{Type: "agent_settled"}
@@ -657,5 +722,520 @@ func TestReservedCommandsNeverReachPrompt(t *testing.T) {
 	}
 	if calls := f.getCalls(); slices.Contains(calls, "prompt") {
 		t.Errorf("reserved commands reached prompt; calls = %v", calls)
+	}
+}
+
+func TestStatusIdleReportsScriptedState(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.state = rpc.State{
+		SessionID:           "sess-42",
+		IsStreaming:         false,
+		MessageCount:        3,
+		PendingMessageCount: 0,
+		Model:               &rpc.Model{ID: "mock-model"},
+	}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("HandleUserInput(/status): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeStatus)
+	if notice.State == nil {
+		t.Fatal("Status notice carries no state")
+	}
+	if notice.State.SessionID != "sess-42" || notice.State.IsStreaming {
+		t.Errorf("Status state = %+v, want sess-42 idle", notice.State)
+	}
+	if notice.State.Model == nil || notice.State.Model.ID != "mock-model" {
+		t.Errorf("Status model = %+v, want mock-model", notice.State.Model)
+	}
+	if calls := f.getCalls(); !slices.Equal(calls, []string{"get_state"}) {
+		t.Errorf("calls = %v, want [get_state] and no prompt/steer", calls)
+	}
+}
+
+func TestStatusMidRunLeavesOperationUndisturbed(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.state = rpc.State{SessionID: "sess-1", IsStreaming: true}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+	before := len(f.getCalls())
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("/status while active: %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeStatus)
+	if notice.State == nil || !notice.State.IsStreaming {
+		t.Errorf("Status state = %+v, want streaming sess-1", notice.State)
+	}
+	for _, call := range f.getCalls()[before:] {
+		if call == "prompt" || call == "steer" {
+			t.Errorf("status query submitted %q; calls = %v", call, f.getCalls())
+		}
+	}
+
+	// The active run still settles into its own response afterwards.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+func TestStatusErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.stateErr = errFakeGetState
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/status"); err != nil {
+		t.Fatalf("HandleUserInput(/status): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if notice.Text == "" {
+		t.Error("RoutingFailure must carry the get_state failure cause")
+	}
+	select {
+	case extra := <-n.notices:
+		t.Errorf("unexpected extra notice %q after RoutingFailure", extra.Kind)
+	case extra := <-n.responses:
+		t.Errorf("unexpected response %q after failed status", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestAbortIdleRunsSequenceAndReports(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	// Esc on an idle session still runs the sequence and reports.
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "no operation was active" {
+		t.Errorf("idle AbortReport text = %q, want the no-operation marker", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) ||
+		!slices.Equal(notice.Dropped.FollowUp, []string{"follow"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared queue", notice.Dropped)
+	}
+	assertClearQueueBeforeAbort(t, f)
+}
+
+func assertClearQueueBeforeAbort(t *testing.T, f *fakeClient) {
+	t.Helper()
+	calls := f.getCalls()
+	clearIdx := slices.Index(calls, "clear_queue")
+	abortIdx := slices.Index(calls, "abort")
+	if clearIdx < 0 || abortIdx < 0 {
+		t.Fatalf("abort sequence calls = %v, want clear_queue then abort", calls)
+	}
+	if clearIdx > abortIdx {
+		t.Errorf("abort sequence order = %v, want clear_queue before abort", calls)
+	}
+}
+
+func TestAbortMidRunTerminatesOperation(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	// The abort outcome arrives before the settle: it is the operation's
+	// single terminal outcome.
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("/abort while active: %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "" {
+		t.Errorf("mid-run AbortReport text = %q, want empty (an operation was aborted)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared steering", notice.Dropped)
+	}
+	assertClearQueueBeforeAbort(t, f)
+
+	// A late settle from the aborted run is logged, never attributed: no
+	// second outcome follows the abort report.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q after the abort report", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q after the abort report", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestAbortAfterSettleReportsIdle(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.queue = rpc.QueueContents{FollowUp: []string{"leftover"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	// The settle arrives before the abort outcome: the operation reports its
+	// normal terminal outcome first.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Fatalf("response = %q, want %q", got, "final")
+	}
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "no operation was active" {
+		t.Errorf("post-settle AbortReport text = %q, want the no-operation marker", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.FollowUp, []string{"leftover"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared follow-up", notice.Dropped)
+	}
+}
+
+func TestAbortSequenceErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.abortErr = errFakeAbort
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if !strings.Contains(notice.Text, "fake abort failure") {
+		t.Errorf("RoutingFailure text = %q, want the abort failure cause", notice.Text)
+	}
+
+	// The failed sequence leaves the operation running: its settle is still
+	// attributed normally.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+// TestAbortSettleDuringSequenceReportsAbort pins the reserved-command window:
+// the aborted run settles while /abort is still running clear_queue then abort,
+// so its terminal outcome is deferred and the AbortReport is the operation's
+// single terminal outcome (no EmptyResponse, no final-text query).
+func TestAbortSettleDuringSequenceReportsAbort(t *testing.T) {
+	f := newFakeClient()
+	f.useUnbufferedEvents() // the settle is handled before the abort outcome is posted
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}}
+	f.onAbort = func() { f.events <- rpc.Event{Type: "agent_settled"} }
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("/abort while active: %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeAbortReport)
+	if notice.Text != "" {
+		t.Errorf("AbortReport text = %q, want empty (an operation was aborted)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) {
+		t.Errorf("AbortReport dropped = %+v, want the cleared steering", notice.Dropped)
+	}
+	if calls := f.getCalls(); slices.Contains(calls, "get_last_assistant_text") {
+		t.Errorf("the deferred outcome was delivered: calls = %v", calls)
+	}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q after the abort report", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q after the abort report", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestAbortSequenceErrorAfterSettledInWindowKeepsOutcome pins the failure
+// half of the window: when the sequence fails after the run settled, the
+// deferred outcome is delivered instead of being lost, before the routing
+// failure.
+func TestAbortSequenceErrorAfterSettledInWindowKeepsOutcome(t *testing.T) {
+	f := newFakeClient()
+	f.useUnbufferedEvents()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.abortErr = errFakeAbort
+	f.onAbort = func() { f.events <- rpc.Event{Type: "agent_settled"} }
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("/abort while active: %v", err)
+	}
+	got, notice := n.waitForResponseAndNotice(t)
+	if got != "final" {
+		t.Errorf("deferred response = %q, want %q", got, "final")
+	}
+	if notice.Kind != runtime.NoticeRoutingFailure || !strings.Contains(notice.Text, "fake abort failure") {
+		t.Errorf("notice = %q %q, want the abort failure cause", notice.Kind, notice.Text)
+	}
+}
+
+// TestPromptAfterAbortIgnoresLateSettle pins the post-/abort suppression: a
+// late settle from the aborted run can never complete the next input.
+func TestPromptAfterAbortIgnoresLateSettle(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("new run text")
+	f.promptDisposition = rpc.DispositionStarted
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeAbortReport)
+
+	if err := c.HandleUserInput(context.Background(), "new input"); err != nil {
+		t.Fatalf("HandleUserInput after /abort: %v", err)
+	}
+
+	// A late settle from the aborted run arrives before the new run starts: it
+	// is dropped, so the new run keeps its attribution.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Fatalf("late aborted settle produced response %q", text)
+	case extra := <-n.notices:
+		t.Fatalf("late aborted settle produced notice %q", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "new run text" {
+		t.Errorf("response = %q, want %q", got, "new run text")
+	}
+}
+
+func TestNewSessionMidRunSupersedes(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}}
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if notice.Text != "" {
+		t.Errorf("switched NewSessionReport text = %q, want empty (no cancellation)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) ||
+		!slices.Equal(notice.Dropped.FollowUp, []string{"follow"}) {
+		t.Errorf("NewSessionReport dropped = %+v, want the cleared queue", notice.Dropped)
+	}
+	calls := f.getCalls()
+	clearIdx, newIdx := slices.Index(calls, "clear_queue"), slices.Index(calls, "new_session")
+	if clearIdx < 0 || newIdx < 0 || clearIdx > newIdx {
+		t.Errorf("new-session sequence calls = %v, want clear_queue before new_session", calls)
+	}
+
+	// Trailing events from the superseded run are logged, never attributed:
+	// a failed assistant message in a trailing agent_end produces no
+	// FailedRun, and the trailing settle produces no outcome.
+	f.events <- rpc.Event{
+		Type: "agent_end",
+		Messages: []rpc.Message{
+			{Role: "assistant", StopReason: "error", ErrorMessage: "old run died"},
+		},
+	}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q from trailing superseded events", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q from trailing superseded events", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestNewSessionCancelledKeepsSession(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.newSessionCancelled = true
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if notice.Text != "session switch cancelled" {
+		t.Errorf("cancelled NewSessionReport text = %q, want the cancellation marker", notice.Text)
+	}
+
+	// The current session (and its active run) continues: the run still
+	// settles into its own response afterwards.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
+	}
+}
+
+func TestNewSessionEmptyQueue(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if len(notice.Dropped.Steering) != 0 || len(notice.Dropped.FollowUp) != 0 {
+		t.Errorf("NewSessionReport dropped = %+v, want empty", notice.Dropped)
+	}
+}
+
+// TestNewSessionSettleDuringSequenceReportsReport pins the same window for
+// /new: a superseded run that settles during clear_queue then new_session
+// produces only the NewSessionReport.
+func TestNewSessionSettleDuringSequenceReportsReport(t *testing.T) {
+	f := newFakeClient()
+	f.useUnbufferedEvents() // the settle is handled before the /new outcome is posted
+	n := newRecordingNotifier()
+	f.queue = rpc.QueueContents{Steering: []string{"steered"}, FollowUp: []string{"follow"}}
+	f.onNewSession = func() { f.events <- rpc.Event{Type: "agent_settled"} }
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeNewSessionReport)
+	if notice.Text != "" {
+		t.Errorf("NewSessionReport text = %q, want empty (no cancellation)", notice.Text)
+	}
+	if !slices.Equal(notice.Dropped.Steering, []string{"steered"}) ||
+		!slices.Equal(notice.Dropped.FollowUp, []string{"follow"}) {
+		t.Errorf("NewSessionReport dropped = %+v, want the cleared queue", notice.Dropped)
+	}
+	if calls := f.getCalls(); slices.Contains(calls, "get_last_assistant_text") {
+		t.Errorf("the deferred outcome was delivered: calls = %v", calls)
+	}
+	select {
+	case text := <-n.responses:
+		t.Errorf("unexpected response %q after the new-session report", text)
+	case extra := <-n.notices:
+		t.Errorf("unexpected notice %q after the new-session report", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestNewSessionCancelledAfterSettledInWindowKeepsOutcome pins the cancel half
+// of the window: the switch is cancelled but the run had already settled, so
+// its answer is delivered and the cancellation is still reported.
+func TestNewSessionCancelledAfterSettledInWindowKeepsOutcome(t *testing.T) {
+	f := newFakeClient()
+	f.useUnbufferedEvents()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.newSessionCancelled = true
+	f.onNewSession = func() { f.events <- rpc.Event{Type: "agent_settled"} }
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	got, notice := n.waitForResponseAndNotice(t)
+	if got != "final" {
+		t.Errorf("deferred response = %q, want %q", got, "final")
+	}
+	if notice.Kind != runtime.NoticeNewSessionReport || notice.Text != "session switch cancelled" {
+		t.Errorf("notice = %q %q, want the cancellation marker", notice.Kind, notice.Text)
+	}
+}
+
+func TestPromptAfterNewIgnoresLateSettle(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("new run text")
+	f.promptDisposition = rpc.DispositionStarted
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	n.waitForNotice(t, runtime.NoticeNewSessionReport)
+
+	// A prompt issued right after /new starts a new operation while the
+	// supersede suppression is still armed (no agent_start yet).
+	if err := c.HandleUserInput(context.Background(), "new input"); err != nil {
+		t.Fatalf("HandleUserInput after /new: %v", err)
+	}
+
+	// A late settle from the superseded run arrives before the new run
+	// starts: it is dropped, so the new run keeps its attribution.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	select {
+	case text := <-n.responses:
+		t.Fatalf("late superseded settle produced response %q", text)
+	case extra := <-n.notices:
+		t.Fatalf("late superseded settle produced notice %q", extra.Kind)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	f.events <- rpc.Event{Type: "agent_start"}
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "new run text" {
+		t.Errorf("response = %q, want %q", got, "new run text")
+	}
+}
+
+func TestNewSessionSequenceErrorEmitsRoutingFailure(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.text = new("final")
+	f.newSessionErr = errFakeNewSession
+	c := newTestCoordinator(t, f, n)
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	if err := c.HandleUserInput(context.Background(), "/new"); err != nil {
+		t.Fatalf("HandleUserInput(/new): %v", err)
+	}
+	notice := n.waitForNotice(t, runtime.NoticeRoutingFailure)
+	if !strings.Contains(notice.Text, "fake new_session failure") {
+		t.Errorf("RoutingFailure text = %q, want the new_session failure cause", notice.Text)
+	}
+
+	// The failed sequence leaves the operation running: its settle is still
+	// attributed normally.
+	f.events <- rpc.Event{Type: "agent_settled"}
+	if got := n.waitForResponse(t); got != "final" {
+		t.Errorf("response = %q, want %q", got, "final")
 	}
 }

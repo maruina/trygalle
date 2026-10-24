@@ -1,8 +1,7 @@
 // Command trygalle-repl is the dev-only demo surface for the trygalle
 // coordinator: it routes stdin lines through the coordinator to one long-lived
-// pi rpc subprocess. It is not the production container main process; the
-// reserved commands (/status, /abort, /new) route in slice 4, and SIGINT and
-// SIGTERM wiring lands with the shutdown task.
+// pi rpc subprocess. It is not the production container main process; SIGINT
+// and SIGTERM wiring lands with the shutdown task.
 package main
 
 import (
@@ -59,7 +58,7 @@ Example:
   trygalle-repl --session-dir /tmp/trygalle-demo
 
 Notes:
-  - Reserved commands /status, /abort, and /new land in slice 4.
+  - SIGINT and SIGTERM handling lands with the shutdown task.
   - SIGINT and SIGTERM handling lands with the shutdown task; EOF (Ctrl-D)
     exits cleanly.
 `
@@ -272,6 +271,18 @@ func (n stdoutNotifier) Notice(ctx context.Context, notice runtime.Notice) {
 func renderNotice(n runtime.Notice) string {
 	text := ""
 	switch n.Kind {
+	case runtime.NoticeStatus:
+		if n.State == nil {
+			return "status: no state reported"
+		}
+		// State carries session metadata only; no prompt or tool content.
+		text = fmt.Sprintf("session %s; streaming=%t compacting=%t pending=%d messages=%d",
+			n.State.SessionID, n.State.IsStreaming, n.State.IsCompacting,
+			n.State.PendingMessageCount, n.State.MessageCount)
+		if n.State.Model != nil {
+			text += "; model " + n.State.Model.ID
+		}
+		return text
 	case runtime.NoticeHeartbeat:
 		if n.LastActivity.Type == "" {
 			return fmt.Sprintf("running for %s; no pi activity yet; send /abort to stop", n.Elapsed)
@@ -288,6 +299,32 @@ func renderNotice(n runtime.Notice) string {
 		text = "run failed: " + n.Text
 	case runtime.NoticeRoutingFailure:
 		text = "could not deliver the message: " + n.Text
+	case runtime.NoticeAbortReport:
+		text = "aborted the run"
+		if n.Text != "" {
+			text += "; " + n.Text
+		}
+		// The dropped queue texts prove nothing survives the abort (R12).
+		if len(n.Dropped.Steering) > 0 {
+			text += fmt.Sprintf("; dropped steering: %q", n.Dropped.Steering)
+		}
+		if len(n.Dropped.FollowUp) > 0 {
+			text += fmt.Sprintf("; dropped follow-up: %q", n.Dropped.FollowUp)
+		}
+		return text
+	case runtime.NoticeNewSessionReport:
+		text = "started a new session"
+		if n.Text != "" {
+			text += "; " + n.Text
+		}
+		// The dropped queue texts prove nothing survives the switch (R13).
+		if len(n.Dropped.Steering) > 0 {
+			text += fmt.Sprintf("; dropped steering: %q", n.Dropped.Steering)
+		}
+		if len(n.Dropped.FollowUp) > 0 {
+			text += fmt.Sprintf("; dropped follow-up: %q", n.Dropped.FollowUp)
+		}
+		return text
 	default:
 		text = string(n.Kind)
 	}

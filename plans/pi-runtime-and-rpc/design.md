@@ -49,7 +49,7 @@ Verified against documentation and, where noted, the installed implementation:
 - `steer` and `follow_up` error when the text is an extension command (implementation-verified).
 - `prompt` throws while compaction is in progress; `steer` queues during compaction (implementation-verified).
 - `agent_end` closes one low-level run and may be followed by retries, compaction recovery, steering, or follow-ups. `agent_settled` means Pi has no remaining automatic work.
-- `abort` aborts the current operation and responds after the session is idle. `abort` continues queued steering messages when they remain in the session; interactive Esc behavior is `clear_queue` before `abort`.
+- `abort` aborts the current operation and responds after the session is idle. Queued steering never starts a new run: `agent_start` marks one agent-loop invocation, so a queued message either joins the aborted run's final turn and is aborted with it, or stays queued for the next prompt; either way it produces no answer (live-verified on Pi 1.3.0). Interactive Esc behavior is therefore `clear_queue` before `abort`.
 - `clear_queue` removes queued steering and follow-up messages and returns their text.
 - `new_session` starts a fresh session and can be canceled by a `session_before_switch` extension event handler that returns `{"cancel": true}` (implementation-verified in the Pi 1.3.0 bundle, which maps that result to `{"cancelled": true}` in the `new_session` response).
 - `get_last_assistant_text` returns the last assistant text in the session, or `null` if none exists.
@@ -98,7 +98,7 @@ One rule, no coordinator-state branching:
 
 `prompt{steer}` is correct in every state because Pi decides: idle runs the message (`"started"`), an active run queues it as steering (`"queued"`), and an extension command executes immediately even mid-run (`"handled"`) — the exact TUI behavior. Coordinator state is therefore not a routing input and cannot race Pi's own state. The bare-`steer` fallback exists because `prompt` rejects input during compaction while `steer` queues; delegating the queue to Pi keeps Trygalle stateless, which is why the fallback does not hold the message in Trygalle memory instead.
 
-`/abort` mirrors TUI Esc exactly: `clear_queue` before `abort`, because `abort` alone continues queued steering messages. The returned dropped texts are reported to the user rather than restored to an editor, because Telegram already holds them in the user's own history. The command stays named `/abort` (intent, not a TUI key); the design documents the Esc equivalence.
+`/abort` mirrors TUI Esc exactly: `clear_queue` before `abort`, because `abort` alone does not run queued steering — it either swallows the message into the aborted turn or leaves it queued for the next prompt. The returned dropped texts are reported to the user rather than restored to an editor, because Telegram already holds them in the user's own history. The command stays named `/abort` (intent, not a TUI key); the design documents the Esc equivalence.
 
 `/new` mirrors the TUI's immediate execution: the active operation is superseded, not rejected. `clear_queue` runs first so no steering messages survive the switch. A `session_before_switch` extension handler may cancel the switch by returning `{"cancel": true}` (reported as `{"cancelled": true}` in the `new_session` response); Trygalle reports the cancellation and keeps the current session.
 
@@ -111,7 +111,9 @@ States and transitions:
 |---|---|---|
 | Idle | Startup complete, or terminal state delivered | `prompt` accepted (`"started"`) or `"handled"` with a preceding `agent_start` |
 | Running | Run started for the operation | `agent_settled`, failure classification, abort, or `/new` supersede |
-| Superseded | `new_session` succeeded mid-run | Idle after reporting |
+| Superseded | `new_session` succeeded mid-run, or `/abort` ended the operation | Next `agent_start`, which re-arms attribution |
+
+A reserved command (`/abort`, `/new`) runs its RPC sequence inside a window that opens before the first command and closes when the outcome arrives. Pi settles the old run inside that window, so the settle does not produce its own terminal outcome: the outcome is deferred, then discarded when the sequence completes, because the reserved command's report is the operation's single terminal outcome (see "Terminal states"). If the sequence is canceled or fails, the deferred outcome is delivered instead, so the run's answer is never lost. The window also suppresses trailing events until the next `agent_start`, so a late settle from the aborted or superseded run can never complete a later input.
 
 Completion rules:
 
@@ -193,7 +195,7 @@ Decision: rejected. Bare `steer` errors on extension commands, so mid-run extens
 
 ### `abort` alone for `/abort`
 Merit: one RPC call; aborts the active operation and waits for idle.
-Decision: rejected. `abort` continues queued steering messages when they remain in the session, so the user's undelivered corrections would run after the abort. Esc parity requires `clear_queue` first.
+Decision: rejected. `abort` alone never answers queued steering: the message either joins the aborted turn or stays queued for the next prompt, so the user's undelivered corrections would be silently swallowed or silently replayed. Esc parity requires `clear_queue` first.
 
 ### Hold compaction-window messages in Trygalle
 Merit: the TUI does this with its own compaction queue, so it is the behavior Pi's authors chose for the same case.
@@ -237,7 +239,7 @@ Contract tests run against a controlled Pi process (or a protocol fixture implem
 
 1. `prompt{steer}` dispositions in each state: idle (`"started"`), active run (`"queued"`), extension command mid-run (`"handled"` + immediate execution).
 2. Steer queued during compaction is delivered after compaction ends.
-3. `clear_queue` before `abort` leaves nothing queued; `abort` alone continues queued steering messages (pin the documented behavior).
+3. `clear_queue` before `abort` leaves nothing queued; `abort` alone never runs queued steering (no new `agent_start`, no assistant text).
 4. Trailing events after mid-run `new_session`; steering queue state after `clear_queue` + `new_session`.
 5. `new_session` canceled by a `session_before_switch` handler reports `cancelled` and keeps the session.
 6. `--continue` on an empty session directory (first boot) and on a damaged latest session (partial trailing line; wholly unreadable file).
@@ -281,7 +283,7 @@ The design was reviewed skeptically against the approved scope.
 
 Material findings incorporated:
 - The parent's reject-busy and `/new`-busy decisions were changed with explicit rationale and prior-art evidence; both beta success criteria were rewritten to match.
-- The routing rule was corrected twice during the session: bare `steer` (errors on extension commands) and `abort`-then-`clear_queue` (wrong order; `abort` continues queued messages). The final rules are `prompt{steer}` everywhere and `clear_queue` before `abort`.
+- The routing rule was corrected twice during the session: bare `steer` (errors on extension commands) and `abort`-then-`clear_queue` (wrong order; `abort` consumes queued messages without running them). The final rules are `prompt{steer}` everywhere and `clear_queue` before `abort`.
 - The damaged-session crash-loop risk was reduced by evidence: Pi skips malformed lines and excludes unreadable files from discovery. The degraded ladder covers the residual case.
 - The stale-text trap (`get_last_assistant_text` after a handled-no-run prompt) is guarded by rule rather than by hope.
 - Every fact relied on that the documentation does not state is listed as a contract test rather than assumed.
