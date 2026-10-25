@@ -722,9 +722,9 @@ Delivers deterministic SIGTERM behavior, the docs, and the feature-level gate.
 **Traces to:** Durable-plan documentation requirement
 **Files:** `AGENTS.md`, `README.md`
 
-- [ ] Create `AGENTS.md`: build and test commands; live-test gate (`TRYGALLE_PI_BIN`, `TRYGALLE_PI_TESTS` semantics, and version check); the pinned Pi version (1.3.0) and the contract tests' role as the upgrade evidence gate; REPL usage; the constraint that Pi is the authority on session/run state (no competing implementations); the stdlib-only constraint. Describe the existing `.github/workflows/ci.yml` split: the short job (`-race -short`) skips live tests by design, and the full job installs Pi 1.3.0 and sets `TRYGALLE_PI_TESTS=on`.
-- [ ] Extend `README.md` with a short Development section pointing to `AGENTS.md` and the test commands.
-- [ ] Commit with `docs: add agent and development instructions`.
+- [x] Create `AGENTS.md`: build and test commands; live-test gate (`TRYGALLE_PI_BIN`, `TRYGALLE_PI_TESTS` semantics, and version check); the pinned Pi version (1.3.0) and the contract tests' role as the upgrade evidence gate; REPL usage; the constraint that Pi is the authority on session/run state (no competing implementations); the stdlib-only constraint. Describe the existing `.github/workflows/ci.yml` split: the short job (`-race -short`) skips live tests by design, and the full job installs Pi 1.3.0 and sets `TRYGALLE_PI_TESTS=on`. Verified: created `AGENTS.md` with layout, build/test commands, the gate table (`auto`/`on`/`off`, `TRYGALLE_PI_BIN`, `-short`), the missing-or-wrong-version behavior, the pinned-version upgrade gate, coordinator and framing constraints, the REPL surface with its exit codes, and the CI short/full split. The gate semantics were re-checked against `internal/harness/harness.go` (`resolveGate`, `classifyGate`, `Pi`) rather than restated from the plan.
+- [x] Extend `README.md` with a short Development section pointing to `AGENTS.md` and the test commands. Verified: a two-command Development section that links `AGENTS.md`; no duplicated reference content.
+- [x] Commit with `docs: add agent and development instructions`. Verified: committed as 4cf928b.
 
 ### Task 22: Final verification
 **Delivers:** The feature-level acceptance gate that only the completed component satisfies.
