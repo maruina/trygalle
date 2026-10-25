@@ -90,7 +90,7 @@ func TestRunReturnsHandlerError(t *testing.T) {
 
 func TestCommandHelpExitsCleanly(t *testing.T) {
 	var stdout, stderr strings.Builder
-	err := command([]string{"--help"}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
+	err := command(context.Background(), []string{"--help"}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("command(--help) error = %v, want a clean exit", err)
 	}
@@ -104,7 +104,7 @@ func TestCommandHelpExitsCleanly(t *testing.T) {
 
 func TestCommandRequiresSessionDir(t *testing.T) {
 	var stdout, stderr strings.Builder
-	err := command([]string{}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
+	err := command(context.Background(), []string{}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 	if !errors.Is(err, errUsage) {
 		t.Fatalf("command() error = %v, want errUsage", err)
 	}
@@ -117,7 +117,7 @@ func TestCommandRejectsNonPositiveHeartbeat(t *testing.T) {
 	for _, value := range []string{"0", "-1s"} {
 		var stdout, stderr strings.Builder
 		argv := []string{"--session-dir", "/tmp/s", "--heartbeat-interval", value}
-		err := command(argv, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
+		err := command(context.Background(), argv, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 		if !errors.Is(err, errUsage) {
 			t.Fatalf("--heartbeat-interval %s error = %v, want errUsage", value, err)
 		}
@@ -233,5 +233,32 @@ func TestBuildArgs(t *testing.T) {
 	}
 	if got := buildArgs(true, "/data/s"); strings.Join(got, " ") != "--mode rpc --session-dir /data/s" {
 		t.Errorf("buildArgs(true) = %v", got)
+	}
+}
+
+func TestRenderNoticeRestartNotice(t *testing.T) {
+	got := renderNotice(runtime.Notice{Kind: runtime.NoticeRestartNotice})
+	for _, want := range []string{"restarting", "closing the pi session"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderNotice(RestartNotice) = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestExitCauseDropsSignalCancellation(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := exitCause(canceled, context.Canceled); err != nil {
+		t.Errorf("exitCause after a signal = %v, want a clean exit", err)
+	}
+
+	live := context.Background()
+	if err := exitCause(live, context.Canceled); !errors.Is(err, context.Canceled) {
+		t.Errorf("exitCause without a signal = %v, want the cancellation", err)
+	}
+
+	fatal := errors.New("pi failed")
+	if err := exitCause(canceled, fatal); !errors.Is(err, fatal) {
+		t.Errorf("exitCause(fatal) = %v, want the fatal error", err)
 	}
 }

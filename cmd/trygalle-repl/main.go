@@ -1,7 +1,7 @@
 // Command trygalle-repl is the dev-only demo surface for the trygalle
 // coordinator: it routes stdin lines through the coordinator to one long-lived
 // pi rpc subprocess. It is not the production container main process; SIGINT
-// and SIGTERM wiring lands with the shutdown task.
+// and SIGTERM run the runtime shutdown sequence and exit 0.
 package main
 
 import (
@@ -13,7 +13,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/maruina/trygalle/internal/rpc"
@@ -58,14 +60,19 @@ Example:
   trygalle-repl --session-dir /tmp/trygalle-demo
 
 Notes:
-  - SIGINT and SIGTERM handling lands with the shutdown task.
-  - SIGINT and SIGTERM handling lands with the shutdown task; EOF (Ctrl-D)
-    exits cleanly.
+  - SIGINT and SIGTERM abort an active run, close pi's stdin, and exit 0
+    within --shutdown-timeout.
+  - EOF (Ctrl-D) exits cleanly.
 `
 
 func main() {
+	// SIGINT and SIGTERM end the input loop; Shutdown then bounds the exit, so
+	// the process exits 0 in either case (R17).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	code := 0
-	switch err := command(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); {
+	switch err := command(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); {
 	case err == nil:
 	case errors.Is(err, errUsage):
 		// Usage text was already printed by command.
@@ -77,8 +84,10 @@ func main() {
 	os.Exit(code)
 }
 
-// command is the process entry logic; it returns the process exit cause.
-func command(argv []string, stdin io.ReadCloser, stdout, stderr io.Writer) error {
+// command is the process entry logic; it returns the process exit cause. The
+// context carries the signal cancellation, so a SIGTERM unwinds the same path
+// as a fatal runtime error and still exits 0.
+func command(ctx context.Context, argv []string, stdin io.ReadCloser, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("trygalle-repl", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(stdout, usage) }
 	piBin := fs.String("pi-bin", "pi", "pi binary to run")
@@ -129,17 +138,24 @@ func command(argv []string, stdin io.ReadCloser, stdout, stderr io.Writer) error
 	}
 	coord := runtime.NewCoordinator(client, stdoutNotifier{w: stdout}, cfg, log)
 
-	runErr := run(context.Background(), stdin, stdout, coord)
-
-	// minimal shutdown for this slice (full clear_queue -> abort ladder and
-	// signal wiring land with the shutdown task): stop the coordinator loop,
-	// then ask pi for an orderly exit and bound the wait.
-	coord.Close()
-	if err := client.CloseStdin(); err != nil {
-		log.Error("close pi stdin", "error", err)
+	runErr := exitCause(ctx, run(ctx, stdin, stdout, coord))
+	// Shutdown owns the ordered close: abort an active run with Esc parity,
+	// close pi's stdin, and bound its exit (R17). It returns nil either way.
+	if err := coord.Shutdown(context.Background()); err != nil {
+		log.Error("shutdown", "error", err)
 	}
-	waitPiExit(client, cfg.ShutdownTimeout, log)
 
+	return runErr
+}
+
+// exitCause drops the signal cancellation from the exit cause: a SIGINT or
+// SIGTERM only ends the input loop, and the shutdown sequence that follows is
+// the orderly exit, so the process exits 0 (R17, R18). Every other failure is
+// still returned.
+func exitCause(ctx context.Context, runErr error) error {
+	if errors.Is(runErr, context.Canceled) && ctx.Err() != nil {
+		return nil
+	}
 	return runErr
 }
 
@@ -238,25 +254,6 @@ func handleInputLine(ctx context.Context, handler inputHandler, line string) err
 	return handler.HandleUserInput(ctx, line)
 }
 
-// waitPiExit waits for pi's orderly exit up to the shutdown deadline, killing
-// the child only after it misses the deadline (design "Shutdown").
-func waitPiExit(client runtime.PiClient, timeout time.Duration, log *slog.Logger) {
-	done := make(chan error, 1)
-	go func() { done <- client.Wait() }()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case err := <-done:
-		if err != nil {
-			log.Error("pi exited with failure", "error", err)
-		}
-	case <-timer.C:
-		if err := client.Kill(); err != nil {
-			log.Error("kill pi", "error", err)
-		}
-	}
-}
-
 // stdoutNotifier implements runtime.Notifier on stdout: responses print as-is,
 // notices carry a [trygalle] prefix so pi output and system notices are easy
 // to tell apart. The wording is owned by the Telegram design; these renderings
@@ -332,6 +329,10 @@ func renderNotice(n runtime.Notice) string {
 		return text
 	case runtime.NoticeSessionResumeFailed:
 		text = "session resume failed; started a fresh conversation: " + n.Text
+	case runtime.NoticeRestartNotice:
+		// Best-effort and non-blocking: shutdown ends the process regardless
+		// of whether this notice is delivered.
+		text = "restarting; closing the pi session"
 	default:
 		text = string(n.Kind)
 	}

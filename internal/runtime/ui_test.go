@@ -69,6 +69,17 @@ func (h *logCapture) waitFor(t *testing.T, msg string) logRecord {
 	}
 }
 
+// messages returns the logged message of every record, in write order.
+func (h *logCapture) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.records))
+	for i, rec := range h.records {
+		out[i] = rec.msg
+	}
+	return out
+}
+
 // waitForCall polls the fake client's recorded calls until want appears.
 func waitForCall(t *testing.T, f *fakeClient, want string) {
 	t.Helper()

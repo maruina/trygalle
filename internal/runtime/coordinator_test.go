@@ -63,7 +63,12 @@ type fakeClient struct {
 	ui     chan rpc.UIRequest
 
 	died    chan struct{}
+	dieOnce sync.Once
 	waitErr error
+
+	// dieOnCloseStdin makes the fake pi exit as soon as its stdin closes, the
+	// way a healthy child does after an orderly shutdown request.
+	dieOnCloseStdin bool
 
 	activityMu sync.Mutex
 	activity   rpc.Activity
@@ -182,7 +187,13 @@ func (f *fakeClient) AnswerUIDialog(ctx context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeClient) CloseStdin() error { f.record("close_stdin"); return nil }
+func (f *fakeClient) CloseStdin() error {
+	f.record("close_stdin")
+	if f.dieOnCloseStdin {
+		f.die()
+	}
+	return nil
+}
 
 func (f *fakeClient) Kill() error { f.record("kill"); return nil }
 
@@ -194,7 +205,7 @@ func (f *fakeClient) Wait() error {
 	return f.waitErr
 }
 
-func (f *fakeClient) die() { close(f.died) }
+func (f *fakeClient) die() { f.dieOnce.Do(func() { close(f.died) }) }
 
 // useUnbufferedEvents makes the event channel unbuffered, so a test that plays
 // an event from an RPC hook knows the loop received it before the RPC returns.

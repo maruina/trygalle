@@ -65,12 +65,13 @@ var (
 type cmdKind int
 
 const (
-	cmdBegin   cmdKind = iota // an input is about to be submitted to Pi
-	cmdResult                 // the RPC outcome of a submission
-	cmdStatus                 // a /status query outcome; read-only, no operation state
-	cmdAbort                  // a /abort sequence outcome; terminates the running operation
-	cmdNew                    // a /new sequence outcome; supersedes the running operation
-	cmdReserve                // opens the reserved-command window the caller's RPC sequence runs in
+	cmdBegin    cmdKind = iota // an input is about to be submitted to Pi
+	cmdResult                  // the RPC outcome of a submission
+	cmdStatus                  // a /status query outcome; read-only, no operation state
+	cmdAbort                   // a /abort sequence outcome; terminates the running operation
+	cmdNew                     // a /new sequence outcome; supersedes the running operation
+	cmdReserve                 // opens the reserved-command window the caller's RPC sequence runs in
+	cmdShutdown                // the process is shutting down; no terminal outcome is attributed after it
 )
 
 type coordCommand struct {
@@ -80,6 +81,7 @@ type coordCommand struct {
 	status      State         // the /status query outcome for cmdStatus
 	dropped     QueueContents // the clear_queue outcome for cmdAbort and cmdNew
 	cancelled   bool          // the new_session outcome for cmdNew
+	running     chan bool     // the active-operation answer for cmdShutdown
 	err         error
 	ack         chan error
 }
@@ -122,6 +124,11 @@ type Coordinator struct {
 	reserved      bool
 	reservedHadOp bool       // an operation was active when the window opened
 	deferred      *operation // the operation that settled inside the window
+
+	// shutdownRequested is set when Shutdown takes over. From then on a clean
+	// pi exit is the expected end of the process, and run outcomes are not
+	// attributed because the shutdown sequence owns them (R17).
+	shutdownRequested bool
 
 	hbTicker *time.Ticker // non-nil while an operation runs
 	hbC      <-chan time.Time
@@ -367,6 +374,8 @@ func (c *Coordinator) loop() {
 				c.handleNew(cmd)
 			case cmdReserve:
 				c.handleReserve(cmd)
+			case cmdShutdown:
+				c.handleShutdown(cmd)
 			}
 		case e := <-c.client.Events():
 			c.handleEvent(e)
@@ -376,6 +385,10 @@ func (c *Coordinator) loop() {
 			c.handleUIRequest(u)
 		case err := <-exitCh:
 			switch {
+			case err == nil && c.shutdownRequested:
+				// The shutdown sequence closed stdin, so a clean exit is
+				// the expected end of the process.
+				c.log.Info("pi exited after the shutdown request")
 			case err == nil:
 				// An orderly exit only follows a stdin close, which the
 				// coordinator never requests while running; treat it as
@@ -403,6 +416,20 @@ func (c *Coordinator) fail(err error) {
 // handleReserve opens the reserved-command window and records whether an
 // operation was active when it opened, which is what the /abort report needs
 // when the operation settles inside the window.
+// handleShutdown puts the loop in shutdown mode: a clean pi exit after this
+// point is the expected end of the process, not a fatal condition, and a run
+// that settles is not attributed a terminal outcome because the shutdown
+// sequence owns it. The restart notice is best effort and runs on its own
+// goroutine so a slow transport can never delay shutdown (design "Shutdown",
+// step 4).
+func (c *Coordinator) handleShutdown(cmd coordCommand) {
+	c.shutdownRequested = true
+	c.log.Info("shutdown requested")
+	cmd.running <- c.op != nil
+	cmd.ack <- nil
+	go c.notifier.Notice(context.Background(), Notice{Kind: NoticeRestartNotice})
+}
+
 func (c *Coordinator) handleReserve(cmd coordCommand) {
 	if c.reserved {
 		cmd.ack <- errReservedInFlight
@@ -594,6 +621,13 @@ func (c *Coordinator) noteAgentStart() {
 
 func (c *Coordinator) noteSettled() {
 	switch {
+	case c.op != nil && c.shutdownRequested:
+		// The shutdown sequence is aborting this run; the restart notice is
+		// its outcome, so no final-text query runs against a dying child.
+		c.op = nil
+		c.state = stateIdle
+		c.stopHeartbeat()
+		c.log.Info("operation settled during shutdown")
 	case c.op != nil && c.reserved:
 		// The run settled while a reserved command sequence was in flight: the
 		// reserved report becomes the single terminal outcome, so this one is
