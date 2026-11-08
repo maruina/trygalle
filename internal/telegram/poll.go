@@ -127,6 +127,16 @@ func (e *pollFloodError) Error() string {
 // it never advances the stall counter); anything else backs off briefly,
 // and the fifth consecutive recoverable failure logs the one polling-stall
 // warning.
+// RunPoll drives the transport-owned long-poll loop against the
+// coordinator: the production inbound seam over the unexported poller. It
+// blocks until ctx is cancelled (nil, the shutdown path) or a fatal failure
+// surfaces — a 409/401 poll conflict, or a non-nil handler return, which
+// the design reads as coordinator death. Returns after the handler error's
+// own processing, not after operation settlement.
+func (t *Transport) RunPoll(ctx context.Context, coord *runtime.Coordinator) error {
+	return newPoller(t.cfg, t.sender, coord, nil, t.log).Run(ctx)
+}
+
 func (p *poller) Run(ctx context.Context) error {
 	p.log.InfoContext(ctx, "poll loop started")
 	defer p.log.InfoContext(ctx, "poll loop stopped")
