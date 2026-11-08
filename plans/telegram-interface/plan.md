@@ -329,6 +329,14 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 | `write` | `agent-selected` | Plan ledger precision | Applied claim-vs-hedge and rejection-reasons-first rules on execution notes |
 | `codebase-research` | `agent-selected` | Render/delivery correctness depends on the pinned seam | Verified `Notice` payload fields, coordinator marker strings (`internal/runtime/coordinator_result.go`), `HandleUserInput` return semantics, and the library's error wrapping at the send boundary |
 
+Tasks 5–6 execution (2026-11-08 run):| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `resolve-worktree` | `prompt-required` | Plan path from another worktree | Resolved to the `maruina/telegram-interface` worktree; all commands ran there |
+| `skill-loader` | `prompt-required` | Execution template requires it before editing | Routed skills by affected files |
+| `feature-worktree` | `prompt-required` | Writes must not land on `main` | Confirmed the existing `maruina/telegram-interface` worktree (clean tree, committed lifecycle docs) as the write target |
+| `go-best-practices` | `skill-loader` | `.go` test and delivery files touched | Red-green discipline on Task 6, table tests, goroutine-safe server log, no new dependency, race runs as verification |
+| `write` | `agent-selected` | Plan ledger precision | Claim-vs-hedge and evidence-first rules on the Task 5–6 execution notes |
+
 ### Amendment record (2026-11-08, from /verify on slice 1)
 
 - Verification found the Test Strategy row "Outbound wire format and failure classification (the real library end-to-end)" with no owning task: no test used `httptest`, `bot.New`, or `WithServerURL`. Task 5 now owns that row.
@@ -341,10 +349,12 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Retry-ambiguity-exhaustion policy (HTTP 5xx clause); Test Strategy row "Outbound wire format and failure classification (the real library end-to-end)"
 **Files:** `internal/telegram/outbound_test.go`
 
-- [ ] Build the test helper: an `httptest` mock Bot API server plus a real `*bot.Bot` constructed with `WithServerURL` and `WithSkipGetMe` (both verified options in v1.27.0), stored as the `sender`.
-- [ ] Add the focused failing test asserting the wire format (form fields carrying `chat_id` set to the allowed user and the exact text, with no `parse_mode` field) and the failure classes: 5xx retries as proven transient until the server accepts, delivering exactly once; 429 with `retry_after` waits and retries without consuming the send-retry budget; 400, 403, and 404 drop permanently with no retry; classification unwraps the library's errors with `errors.As` (`raw_request.go` wraps with `%w`; 429 returns the typed `retry_after` sentinel).
-- [ ] Run `go test ./internal/telegram -race`; expect green, with `New`, `serverStatusTransport`, and `telegramServerError` covered through the real constructor (production `telegram.go` wires `serverStatusTransport` into `New`).
-- [ ] Commit with `test: telegram outbound wire format and failure classes through the library`.
+- [x] Build the test helper: an `httptest` mock Bot API server plus a real `*bot.Bot` constructed with `WithServerURL` and `WithSkipGetMe` (both verified options in v1.27.0), stored as the `sender`.
+- [x] Add the focused failing test asserting the wire format (form fields carrying `chat_id` set to the allowed user and the exact text, with no `parse_mode` field) and the failure classes: 5xx retries as proven transient until the server accepts, delivering exactly once; 429 with `retry_after` waits and retries without consuming the send-retry budget; 400, 403, and 404 drop permanently with no retry; classification unwraps the library's errors with `errors.As` (`raw_request.go` wraps with `%w`; 429 returns the typed `retry_after` sentinel).
+- [x] Run `go test ./internal/telegram -race`; expect green, with `New`, `serverStatusTransport`, and `telegramServerError` covered through the real constructor (production `telegram.go` wires `serverStatusTransport` into `New`).
+- [x] Commit with `test: telegram outbound wire format and failure classes through the library`. Commit 9d70cfc.
+
+Task 5 execution notes: the helper builds `bot.New` with the same wiring production `New` uses (an `http.Client` carrying `serverStatusTransport`, `WithSkipGetMe`), so `serverStatusTransport` and `telegramServerError` are exercised through the real constructor path; `New` itself cannot accept a server URL, so production-only injection is composition-level (Task 9's `New` call) and the wiring equality is by construction here. The delivery pipeline already implemented every class in Task 4, so the library-path tests pinned green on re-run — their value is that the suite can now false on a wire or classification regression; the only red run came from a wrong backoff expectation in the new test itself (1s then 2s, per `sendBackoff`), not from production code. Verified against the library source: 429 is returned as the direct `*bot.TooManyRequestsError` (typed field, no wrap), and 400/403/404 wrap `ErrorBadRequest`/`ErrorForbidden`/`ErrorNotFound` sentinels with `%w`. The mock server logs parsed multipart fields and a success-answer count, so "delivered exactly once" reads off the server, not the transport.
 
 ### Task 6: Single-attempt restart notice
 **Delivers:** `deliver()` gives once-messages exactly one send attempt; a failed attempt drops the notice with a metadata-only log and never resends, matching the Task 4 wording and the *Process composition and shutdown* scenario.
@@ -352,10 +362,12 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Process composition and shutdown ("single-attempt `RestartNotice`"); Key Decisions "RestartNotice bypasses the hold queue (single enqueue, never held)"
 **Files:** `internal/telegram/delivery.go`, `internal/telegram/delivery_test.go`
 
-- [ ] Add the focused failing test: extend the close-drain coverage with a stub whose first attempt fails with a proven transient error (connection reset); expect exactly one call, no delivery, and no content in the log.
-- [ ] Implement the smallest change: `deliver()` treats `outcomeRetry` and `outcomeFlood` for a `msg.once` message as a terminal drop with metadata-only logging; backoff and flood-wait behavior is unchanged for every other class.
-- [ ] Run `go test ./internal/telegram -race` and `go test ./internal/runtime ./internal/telegram -race`; expect green.
-- [ ] Commit with `fix: make the telegram restart notice single attempt`.
+- [x] Add the focused failing test: extend the close-drain coverage with a stub whose first attempt fails with a proven transient error (connection reset); expect exactly one call, no delivery, and no content in the log. First run red as required: the pre-fix stub saw 5 calls (full budget burn) and no once-drop record.
+- [x] Implement the smallest change: `deliver()` treats `outcomeRetry` and `outcomeFlood` for a `msg.once` message as a terminal drop with metadata-only logging; backoff and flood-wait behavior is unchanged for every other class.
+- [x] Run `go test ./internal/telegram -race` and `go test ./internal/runtime ./internal/telegram -race`; expect green.
+- [x] Commit with `fix: make the telegram restart notice single attempt`. Commit b26e62a.
+
+Slice 1 execution notes for Tasks 5–6: both tasks verified clean after implementation, `gofmt -l ./cmd ./internal` empty and `go vet ./...` clean. The two once-drop branches share the same log wording; a helper was declined because each branch sits inline in the outcome switch and stays three lines each.
 
 ### Slice 2: Inbound pipeline
 **Delivers:** poll loop over the mock Bot API with offset-0 replay, ack-after-handoff, allowlist, raw forwarding including reserved-command text, a canned reply for non-text updates, and the 409/401/429/stall failure classes.
