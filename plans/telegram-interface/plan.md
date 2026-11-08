@@ -26,6 +26,11 @@
 | `go-best-practices` | `skill-loader` | `.go` files will be created | Concurrency/cancellation, goroutine lifetime, error classification, test-seam guidance applied to the plan's components |
 | `cli-best-practices` | `skill-loader` | New `cmd/trygalle` CLI | Flag env split, exit-code contract, no secrets in output |
 | `write` | `agent-selected` | Durable plan prose | Applied concision, claim-vs-hedge, and rejection-reasons-first rules |
+| `resolve-worktree` | `prompt-required` | 2026-11-08 amendment | Confirmed the `maruina/telegram-interface` worktree and branch before edits |
+| `feature-worktree` | `prompt-required` | 2026-11-08 amendment | Confirmed writes and the plan commit belong in the existing feature worktree, not `main` |
+| `learning-lookup` | `prompt-required` | 2026-11-08 amendment | Re-ran with retry budget, restart notice, shutdown drain, mock server, and stub terms; 0 of 18 store sections matched |
+| `learning-candidates` | `prompt-required` | Review findings changed the plan | Appended two candidates under `## Learning candidates` |
+| `write` | `agent-selected` | 2026-11-08 amendment | Claim-precision and rejection-reasons rules on the amendment record and new task text |
 
 ## Planning alignment brief (confirmed 2026-11-08)
 
@@ -254,7 +259,7 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 ---
 
 ### Slice 1: Outbound pipeline (smallest user-feedback slice)
-**Delivers:** the transport implemented as `runtime.Notifier`: rendering all 12 outbound classes, chunking, and delivering to a mock Bot API with retry/supersede/hold semantics proven by package tests.
+**Delivers:** the transport implemented as `runtime.Notifier`: rendering all 12 outbound classes, chunking, and delivering with retry/supersede/hold rules proven by package tests, including the real `*bot.Bot` against a mock Bot API server and the single-attempt restart notice.
 
 ### Task 1: Package scaffold and dependency pin
 **Delivers:** `internal/telegram` compiles with the pinned dependency and the package constants (chunk limit, send retry budget and backoff cap, held-message cap, stall threshold).
@@ -324,10 +329,38 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 | `write` | `agent-selected` | Plan ledger precision | Applied claim-vs-hedge and rejection-reasons-first rules on execution notes |
 | `codebase-research` | `agent-selected` | Render/delivery correctness depends on the pinned seam | Verified `Notice` payload fields, coordinator marker strings (`internal/runtime/coordinator_result.go`), `HandleUserInput` return semantics, and the library's error wrapping at the send boundary |
 
+### Amendment record (2026-11-08, from /verify on slice 1)
+
+- Verification found the Test Strategy row "Outbound wire format and failure classification (the real library end-to-end)" with no owning task: no test used `httptest`, `bot.New`, or `WithServerURL`. Task 5 now owns that row.
+- Verification found the pinned single-attempt claim unimplemented: `deliver()` has no `once`-specific handling, so `outcomeRetry`/`outcomeFlood` retried the restart notice within the send budget, and `TestCloseDeliversRestartNoticeAndDropsHeld` used a stub that succeeds on the first call, so no test observed the claim. Task 6 makes the code match the wording pinned in Task 4, the Key Decisions table, and the *Process composition and shutdown* scenario.
+- Previously listed Tasks 5–9, all unexecuted, shifted to 7–11; their content and blocked-by chains are otherwise changed only by renumbering. Executed Tasks 1–4 keep their numbers and evidence.
+
+### Task 5: Outbound wire format and failure classes through the real library
+**Delivers:** integration tests through the real `*bot.Bot` against a mock Bot API server, pinning the outbound wire format and the 429-with-`retry_after`, 400/403/404, and 5xx classifications through `errors.As` on the library's wrapped errors.
+**Blocked by:** Task 4
+**Traces to:** Retry-ambiguity-exhaustion policy (HTTP 5xx clause); Test Strategy row "Outbound wire format and failure classification (the real library end-to-end)"
+**Files:** `internal/telegram/outbound_test.go`
+
+- [ ] Build the test helper: an `httptest` mock Bot API server plus a real `*bot.Bot` constructed with `WithServerURL` and `WithSkipGetMe` (both verified options in v1.27.0), stored as the `sender`.
+- [ ] Add the focused failing test asserting the wire format (form fields carrying `chat_id` set to the allowed user and the exact text, with no `parse_mode` field) and the failure classes: 5xx retries as proven transient until the server accepts, delivering exactly once; 429 with `retry_after` waits and retries without consuming the send-retry budget; 400, 403, and 404 drop permanently with no retry; classification unwraps the library's errors with `errors.As` (`raw_request.go` wraps with `%w`; 429 returns the typed `retry_after` sentinel).
+- [ ] Run `go test ./internal/telegram -race`; expect green, with `New`, `serverStatusTransport`, and `telegramServerError` covered through the real constructor (production `telegram.go` wires `serverStatusTransport` into `New`).
+- [ ] Commit with `test: telegram outbound wire format and failure classes through the library`.
+
+### Task 6: Single-attempt restart notice
+**Delivers:** `deliver()` gives once-messages exactly one send attempt; a failed attempt drops the notice with a metadata-only log and never resends, matching the Task 4 wording and the *Process composition and shutdown* scenario.
+**Blocked by:** Task 4
+**Traces to:** Process composition and shutdown ("single-attempt `RestartNotice`"); Key Decisions "RestartNotice bypasses the hold queue (single enqueue, never held)"
+**Files:** `internal/telegram/delivery.go`, `internal/telegram/delivery_test.go`
+
+- [ ] Add the focused failing test: extend the close-drain coverage with a stub whose first attempt fails with a proven transient error (connection reset); expect exactly one call, no delivery, and no content in the log.
+- [ ] Implement the smallest change: `deliver()` treats `outcomeRetry` and `outcomeFlood` for a `msg.once` message as a terminal drop with metadata-only logging; backoff and flood-wait behavior is unchanged for every other class.
+- [ ] Run `go test ./internal/telegram -race` and `go test ./internal/runtime ./internal/telegram -race`; expect green.
+- [ ] Commit with `fix: make the telegram restart notice single attempt`.
+
 ### Slice 2: Inbound pipeline
 **Delivers:** poll loop over the mock Bot API with offset-0 replay, ack-after-handoff, allowlist, raw forwarding including reserved-command text, a canned reply for non-text updates, and the 409/401/429/stall failure classes.
 
-### Task 5: Poll loop, offset discipline, and forwarding
+### Task 7: Poll loop, offset discipline, and forwarding
 **Delivers:** long-poll loop with an injectable server URL, offset advance after handoff, update-order forwarding, and allowlist enforcement.
 **Blocked by:** Task 4 (transport type exists; the internal seam remains independent)
 **Traces to:** Inbound forwarding with allowlist, Downtime replay from offset 0, Ack-after-handoff offset, Reserved command text passes through raw
@@ -339,9 +372,9 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 - [ ] Run `go test ./internal/telegram -race`; expect green.
 - [ ] Commit with `feat: telegram inbound poll loop with allowlist`.
 
-### Task 6: Transport-level connection-failure classes
+### Task 8: Transport-level connection-failure classes
 **Delivers:** the design's poll-failure taxonomy is proven against the mock server.
-**Blocked by:** Task 5
+**Blocked by:** Task 7
 **Traces to:** Loud configuration and conflict failures, Polling-stall visibility, 429 handling
 **Files:** `internal/telegram/poll.go`, `internal/telegram/poll_test.go`
 
@@ -353,9 +386,9 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 ### Slice 3: Process composition
 **Delivers:** the runnable `cmd/trygalle` binary joining config, startup ladder, coordinator, transport, and shutdown with the exit-code contract.
 
-### Task 7: Composition with env validation and signals
+### Task 9: Composition with env validation and signals
 **Delivers:** `cmd/trygalle` starts, validates fatally, races the poll loop and the coordinator, and shuts down on signals.
-**Blocked by:** Tasks 4, 6
+**Blocked by:** Tasks 4, 8
 **Traces to:** Process composition and shutdown
 **Files:** `cmd/trygalle/main.go`, `cmd/trygalle/main_test.go`
 
@@ -364,9 +397,9 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 - [ ] Run `go build ./...`, `go vet ./...`, `go test -race -short ./...`; expect all green. The transport tests are pure unit and httptest, so the CI short job covers them and no `TRYGALLE_PI_TESTS` change is needed.
 - [ ] Commit with `feat: trygalle production target joining coordinator and telegram transport`.
 
-### Task 8: Manual end-to-end against a throwaway bot
+### Task 10: Manual end-to-end against a throwaway bot
 **Delivers:** design's manual acceptance run recorded.
-**Blocked by:** Task 7
+**Blocked by:** Task 9
 **Traces to:** Rollout and Rollback (operator acceptance), all behavior requirements at a real boundary
 **Files:** none (operator run)
 
@@ -376,9 +409,9 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 ### Slice 4: Documentation and final verification
 **Delivers:** repository docs carry the dependency amendment and runnable surface; full verification green.
 
-### Task 9: Documentation updates
+### Task 11: Documentation updates
 **Delivers:** AGENTS.md amendment and README runnable-surface update.
-**Blocked by:** Task 8
+**Blocked by:** Task 10
 **Traces to:** Documentation impact and AGENTS.md maintenance rule
 **Files:** `AGENTS.md`, `README.md`
 
@@ -389,8 +422,10 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 ### Final verification
 - [ ] `go build ./...`, `go vet ./...`, `gofmt -l ./cmd ./internal`, `go fix -diff ./...`, `go test -race -shuffle=on ./...` all green.
 - [ ] `go list -m all` still shows exactly one third-party module, pinned.
-- [ ] Feature-level acceptance: the full wording matrix and mock-server lifecycle tests green, the single third-party dependency still pinned, and the manual throwaway-bot checklist from Task 8 recorded.
+- [ ] Feature-level acceptance: the full wording matrix and mock-server lifecycle tests green, the single third-party dependency still pinned, and the manual throwaway-bot checklist from Task 10 recorded.
 
 ## Learning candidates
 
 - 2026-11-08: A pinned library's only polling surface can invalidate a design's offset and conflict semantics read straight from the Bot API spec — always probe the library's poll loop before planning offset/failure behavior on that endpoint. Evidence: `github.com/go-telegram/bot@v1.27.0 get_updates.go:63-104` (offset advance in `atomic.StoreInt64(&b.lastUpdateID, upd.ID)` before queueing; conflict treated as retryable) and design "Polling lifecycle and inbound replay" in `plans/telegram-interface/design.md`.
+- 2026-11-08: A Test Strategy row without an owning task ships no coverage — the outbound library-path row existed through all of slice 1, yet no task scheduled it, so wire format, 5xx classification, and `retry_after` extraction had zero tests behind a green suite. Evidence: plans/telegram-interface/plan.md Test Strategy table versus Tasks 1–4; /verify finding F1 (no `httptest`, `bot.New`, or `WithServerURL` on the outbound test path).
+- 2026-11-08: A pinned prose claim no test observes can silently miss the code — three plan places pinned the restart notice at "single attempt", `deliver()` never special-cased `once`, and the close-drain test stub succeeded on the first call, so the suite could not falsify the claim. Evidence: internal/telegram/delivery.go `deliver()` retry branches versus plans/telegram-interface/plan.md Task 4; /verify finding N1.
