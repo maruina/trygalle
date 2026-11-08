@@ -262,10 +262,10 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Dependency amendment decision confirmed in the alignment brief; Implementation Constraints
 **Files:** `internal/telegram/telegram.go`, `go.mod`, `go.sum`
 
-- [ ] Add `github.com/go-telegram/bot v1.27.0` to `go.mod` and record `go.sum`.
-- [ ] Run `go list -m all`; expect exactly `github.com/maruina/trygalle` and `github.com/go-telegram/bot v1.27.0`.
-- [ ] Add package constants with `deliberate:` comments: `maxMessageUTF16CodeUnits = 4096` (Telegram counts the send limit in UTF-16 code units, not runes), `maxSendAttempts`, `sendBackoffCap`, `maxHeldTerminal = 50`, `pollStallFailures = 5`.
-- [ ] Run `go build ./...`; expect success.
+- [x] Add `github.com/go-telegram/bot v1.27.0` to `go.mod` and record `go.sum`.
+- [x] Run `go list -m all`; expect exactly `github.com/maruina/trygalle` and `github.com/go-telegram/bot v1.27.0`.
+- [x] Add package constants with `deliberate:` comments: `maxMessageUTF16CodeUnits = 4096` (Telegram counts the send limit in UTF-16 code units, not runes), `maxSendAttempts`, `sendBackoffCap`, `maxHeldTerminal = 50`, `pollStallFailures = 5`.
+- [x] Run `go build ./...`; expect success.
 
 ### Task 2: Renderer with the pinned wording matrix
 **Delivers:** one render function covering the response class and all 11 notice kinds, tested against the wording table.
@@ -273,10 +273,12 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Outbound render boundary
 **Files:** `internal/telegram/render.go`, `internal/telegram/render_test.go`
 
-- [ ] Add `go test ./internal/telegram -run TestRenderNoticeWording` as the focused failing test (no renderer yet).
-- [ ] Implement the renderer: response passthrough; notice strings verbatim from the design table with these payload rules — `Status` idle uses `SessionID`/`MessageCount`/model with nil model as "unknown", and active discriminates on `State.IsStreaming` (decision 2); `Dropped` contributes `len(Steering)+len(FollowUp)` and never its texts; `RestartNotice` renders its fixed wording regardless of empty `Text`; `AbortReport`/`NewSessionReport` match the coordinator's exact marker strings (`no operation was active`, `session switch cancelled`) first, then discriminate dropped-vs-clean on `len(Steering)+len(FollowUp) > 0` — `Dropped` is a value struct that is always present (`rpc.QueueContents`, `internal/rpc/records.go:121`), so presence cannot discriminate.
-- [ ] Run the command; expect all 12 columns pinned green.
-- [ ] Commit with `feat: pin telegram outbound wording table`.
+- [x] Add `go test ./internal/telegram -run TestRenderNoticeWording` as the focused failing test (no renderer yet).
+- [x] Implement the renderer: response passthrough; notice strings verbatim from the design table with these payload rules — `Status` idle uses `SessionID`/`MessageCount`/model with nil model as "unknown", and active discriminates on `State.IsStreaming` (decision 2); `Dropped` contributes `len(Steering)+len(FollowUp)` and never its texts; `RestartNotice` renders its fixed wording regardless of empty `Text`; `AbortReport`/`NewSessionReport` match the coordinator's exact marker strings (`no operation was active`, `session switch cancelled`) first, then discriminate dropped-vs-clean on `len(Steering)+len(FollowUp) > 0` — `Dropped` is a value struct that is always present (`rpc.QueueContents`, `internal/rpc/records.go:121`), so presence cannot discriminate.
+- [x] Run the command; expect all 12 columns pinned green.
+- [x] Commit with `feat: pin telegram outbound wording table`. Task 1's scaffold (`telegram.go`, `go.mod`, `go.sum`) rides in this commit because Task 1 defines no commit step.
+
+### Execution note: Task 2 commit eae8e80 includes the Task 1 scaffold plus the pinned require; the `// indirect` marker clears when the library import lands in Task 4.
 
 ### Task 3: Chunker
 **Delivers:** a 4096 UTF-16-code-unit chunker preferring line boundaries, splitting only at rune boundaries.
@@ -284,10 +286,10 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Text over 4096 UTF-16 code units
 **Files:** `internal/telegram/chunker.go`, `internal/telegram/chunker_test.go`
 
-- [ ] Add `go test ./internal/telegram -run TestChunk` as the focused failing test.
-- [ ] Implement; table tests cover: exactly 4096-unit output, over-limit with multi-byte characters (no split rune), astral-plane characters counting as two units (a message of 4096 emoji runes chunks, because Telegram would reject it with 400 and the permanent-drop class would lose the content), line-break preference over mid-line hard splits, trailing empty lines, the chunk count for a long Pi response, and delivery splitting at rune boundaries.
-- [ ] Run the command; expect green, with no byte-boundary split case.
-- [ ] Commit with `feat: add telegram outbound chunker`.
+- [x] Add `go test ./internal/telegram -run TestChunk` as the focused failing test.
+- [x] Implement; table tests cover: exactly 4096-unit output, over-limit with multi-byte characters (no split rune), astral-plane characters counting as two units (a message of 4096 emoji runes chunks, because Telegram would reject it with 400 and the permanent-drop class would lose the content), line-break preference over mid-line hard splits, trailing empty lines, the chunk count for a long Pi response, and delivery splitting at rune boundaries.
+- [x] Run the command; expect green, with no byte-boundary split case. First run found the line-break preference re-splitting a remainder that already fit whole; fixed by preferring a break only when a hard cut is needed.
+- [x] Commit with `feat: add telegram outbound chunker`.
 
 ### Task 4: Delivery loop with hold, supersede, and failure classes
 **Delivers:** the single-owner delivery goroutine implementing the retry/ambiguity/exhaustion/supersede/cap rules behind the non-blocking `Notifier`.
@@ -295,12 +297,32 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Traces to:** Non-blocking notifier, Retry-ambiguity-exhaustion policy, Order-preserving delivery with supersede
 **Files:** `internal/telegram/delivery.go`, `internal/telegram/telegram.go`, `internal/telegram/config.go`, `internal/telegram/delivery_test.go`, `internal/telegram/notifier_contract_test.go`
 
-- [ ] Define the `sender` one-method interface (one `SendMessage(ctx, *bot.SendMessageParams) (*models.Message, error)` method) satisfied by `*bot.Bot`; assert with `var _ sender = (*bot.Bot)(nil)`.
-- [ ] Add the seam-focused failing tests: non-blocking `Notice` under a sender that blocks forever, FIFO order, supersede of held `Status`/`Heartbeat`, `retry_after` honored without budget use, transient-hold-then-deliver, timeout-drop, permanent-drop, exhaustion-drop, cap-eviction.
-- [ ] Implement: `Config` (token, allowed user, poll timeout) with validated constructor, mutex-protected bounded queue + signal channel, one delivery goroutine; `Response`/`Notice` enqueue-only; `RestartNotice` bypasses holds with a single attempt; metadata-only logging of retries/exhaustion/eviction.
-- [ ] Run `go test ./internal/telegram -race`; expect green.
-- [ ] Run `go test ./internal/runtime ./internal/telegram -race`; expect green (the runtime seam does not change).
-- [ ] Commit with `feat: telegram outbound delivery pipeline`.
+- [x] Define the `sender` one-method interface (one `SendMessage(ctx, *bot.SendMessageParams) (*models.Message, error)` method) satisfied by `*bot.Bot`; assert with `var _ sender = (*bot.Bot)(nil)`.
+- [x] Add the seam-focused failing tests: non-blocking `Notice` under a sender that blocks forever, FIFO order, supersede of held `Status`/`Heartbeat`, `retry_after` honored without budget use, transient-hold-then-deliver, timeout-drop, permanent-drop, exhaustion-drop, cap-eviction.
+- [x] Implement: `Config` (token, allowed user, poll timeout) with validated constructor, mutex-protected bounded queue + signal channel, one delivery goroutine; `Response`/`Notice` enqueue-only; `RestartNotice` bypasses holds with a single attempt; metadata-only logging of retries/exhaustion/eviction.
+- [x] Run `go test ./internal/telegram -race`; expect green.
+- [x] Run `go test ./internal/runtime ./internal/telegram -race`; expect green (the runtime seam does not change).
+- [x] Commit with `feat: telegram outbound delivery pipeline`. Commit e66c8ec; `go fix -diff ./...` runs clean and the pinned `// indirect` marker cleared as the library import landed.
+
+### Slice 1 execution notes
+
+- Supersede also covers the in-flight head: a `.supersede` enqueue marks an undelivered in-flight same-class message dead via its pointer, so the test scenario "older `Status` never sent" holds even when the head popped before the newer `Status` arrived. A send already on the wire can still complete (unfixable at that point); the deliberate limit is noted in `delivery.go`.
+- Transient failures keep the message as the in-flight head instead of re-queuing, so headship is stable across backoff waits and supersede is observable; a `.dead` check runs at the top of every delivery loop iteration.
+- `Retry-after` waits never increment `attempts` (budget untouched); infinite-flood retry is bounded only by `retry_after` — deliberate, noted at the flood case.
+- HTTP 5xx classify as proven transient via a typed `telegramServerError` injected by a RoundTripper (the serverStatusTransport), because the library's default branch wraps such responses in an unclassified error string. The typed error carries the status code only; the response body is discarded.
+- The default classifier outcome is ambiguous-drop, honoring the design's duplicate guard for timeout, decode, and unknown errors.
+- `Close` marks `closed` and `stopped` together: enqueue becomes a safe drop, held messages are discarded (logged once as a count), and once-messages (the restart notice) drain with a single attempt while the retry context remains alive; the retry context cancels after the goroutine exits or the Close window ends.
+
+### Execution (skills loaded and used during implementation)
+
+| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `resolve-worktree` | `prompt-required` | Plan path from another worktree | Resolved the plan to the `maruina/telegram-interface` worktree and switched context; all commands ran there |
+| `skill-loader` | `prompt-required` | Execution template requires it before editing | Routed skills by affected files; recorded this provenance record |
+| `feature-worktree` | `prompt-required` | Writes must not land on `main` | Confirmed the existing `maruina/telegram-interface` worktree as the write target (branch `maruina/telegram-interface`) |
+| `go-best-practices` | `skill-loader` | `.go` files created in `internal/telegram` | Goroutine lifetime and stop signals, mutex discipline, `errors.Is`/`errors.As` classification, goroutine-leak hygiene via stub cleanup, interface satisfaction assertions, table tests |
+| `write` | `agent-selected` | Plan ledger precision | Applied claim-vs-hedge and rejection-reasons-first rules on execution notes |
+| `codebase-research` | `agent-selected` | Render/delivery correctness depends on the pinned seam | Verified `Notice` payload fields, coordinator marker strings (`internal/runtime/coordinator_result.go`), `HandleUserInput` return semantics, and the library's error wrapping at the send boundary |
 
 ### Slice 2: Inbound pipeline
 **Delivers:** poll loop over the mock Bot API with offset-0 replay, ack-after-handoff, allowlist, raw forwarding including reserved-command text, a canned reply for non-text updates, and the 409/401/429/stall failure classes.
