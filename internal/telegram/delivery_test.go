@@ -517,6 +517,33 @@ func TestHeldQueueCapEvictsOldest(t *testing.T) {
 	}
 }
 
+func TestCloseRestartNoticeSingleAttemptOnFailure(t *testing.T) {
+	t.Parallel()
+	capture, log := newCapture()
+
+	tt, s := newStubTransport(t, log, nil, func(context.Context, int, *bot.SendMessageParams) (*botmodels.Message, error) {
+		return nil, resetSendError()
+	})
+	tt.Notice(context.Background(), runtime.Notice{Kind: runtime.NoticeRestartNotice})
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tt.Close(closeCtx)
+
+	if calls := s.callsMade(); calls != 1 {
+		t.Errorf("send calls = %d, want the restart notice's single attempt with no retry", calls)
+	}
+	if got := s.delivered(); len(got) != 0 {
+		t.Errorf("delivered %q, want the failed restart notice to drop", got)
+	}
+	if n := capture.countMsg("once message dropped"); n != 1 {
+		t.Errorf("once-drop log records = %d, want metadata-only logging of the failed attempt", n)
+	}
+	if capture.contains("Restarting; active operation aborted.") {
+		t.Error("failure log leaked notice content")
+	}
+}
+
 func TestCloseDeliversRestartNoticeAndDropsHeld(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

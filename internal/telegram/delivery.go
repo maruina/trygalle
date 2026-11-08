@@ -177,6 +177,15 @@ func (t *Transport) deliver(msg *qmsg) {
 
 		switch outcome {
 		case outcomeRetry:
+			if msg.once {
+				// The restart notice is a single best-effort drain: a retry
+				// would hold process exit on a dead connection without a
+				// second chance of succeeding.
+				t.log.Warn("telegram once message dropped after failed attempt",
+					"class", msg.class, "units", msg.units, "error", err.Error())
+				t.drop()
+				return
+			}
 			t.mu.Lock()
 			msg.attempts++
 			t.mu.Unlock()
@@ -190,6 +199,12 @@ func (t *Transport) deliver(msg *qmsg) {
 				"class", msg.class, "attempt", msg.attempts, "error", err.Error())
 			t.wait(t.rectx, sendBackoff(msg.attempts))
 		case outcomeFlood:
+			if msg.once {
+				t.log.Warn("telegram once message dropped after failed attempt",
+					"class", msg.class, "units", msg.units, "error", err.Error())
+				t.drop()
+				return
+			}
 			// retry_after is Telegram's own backpressure and does not
 			// consume the send-retry budget; the wait itself bounds the
 			// retry rate.
