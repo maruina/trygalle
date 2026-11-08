@@ -4,7 +4,7 @@
 
 **Goal:** Add the Telegram transport as the second `runtime.Notifier` implementation: long-poll one allowlisted chat, forward raw text to the coordinator, and deliver Pi responses and all notice classes back as plain text.
 
-**Smallest user-feedback slice:** Slice 1 delivers the outbound pipeline: the transport implemented as a `runtime.Notifier` renders all 12 outbound classes, chunks at 4096 characters, and delivers to a mock Bot API server with the design's retry, supersede, and hold rules.
+**Smallest user-feedback slice:** Slice 1 delivers the outbound pipeline: the transport implemented as a `runtime.Notifier` renders all 12 outbound classes, chunks at 4096 UTF-16 code units, and delivers to a mock Bot API server with the design's retry, supersede, and hold rules.
 
 **Out of Scope:** From `plans/telegram-interface/design.md` non-goals: media input/output implementation (seam only, canned reply), HTML/MarkdownV2 dialect, durable outbound queue, `drop_pending_updates`, metrics/tracing/alerting (follow-up #5), any coordinator semantics, notice-payload, or shutdown-sequence change, webhooks, and the image/Kubernetes designs (follow-ups #3 and #4).
 
@@ -32,7 +32,7 @@
 Confirmed decisions the user approved in chat:
 
 - **Poll-loop ownership (decision 1).** Option B: the transport owns `getUpdates` via a small stdlib HTTP client; the library owns sends and decoded models. Rationale: the pinned library's `bot.Start` advances its internal offset before handlers run (at-most-once within a process, losing the design's chosen duplicate-rerun tradeoff) and retries `getUpdates` conflicts internally forever, which the design explicitly rejects. Evidence: `get_updates.go:63-104` in `github.com/go-telegram/bot@v1.27.0`.
-- **Active `Status` wording (decision 2).** Rendered without `Elapsed` (`Working. Queue <PendingMessageCount>. Model <ModelID>.`). Rationale: `NoticeStatus` carries only `*rpc.State` (verified `coordinator_result.go:118`); the coordinator must not change; `Heartbeat` already carries elapsed while a run is active. Decorative deviation from the wording table, recorded here and pinned in render tests.
+- **Active `Status` wording (decision 2).** Rendered without `Elapsed` (`Working. Queue <PendingMessageCount>. Model <ModelID>.`), with idle and active discriminated on `State.IsStreaming` (pinned true mid-run by `internal/runtime/status_live_test.go`; deliberate limit: a run in its pre-streaming phase renders the idle wording). Rationale: `NoticeStatus` carries only `*rpc.State` (verified `coordinator_result.go:118`); the coordinator must not change; `Heartbeat` already carries elapsed while a run is active. Decorative deviation from the wording table, recorded here and pinned in render tests.
 - **Smaller recommendations:** constant cap on held terminal messages (oldest dropped, log-only), persistent HTTP 401 treated like 409 as a fatal configuration error, nil `Model` renders "unknown", one canned non-text string, 429 retries do not consume the send-retry budget, polling-stall diagnostic trips after 5 consecutive poll failures.
 - **Slice split:** four slices (outbound pipeline, inbound polling, composition, docs and final verification).
 
@@ -58,6 +58,7 @@ Confirmed decisions the user approved in chat:
 | Library owns sends through a narrow `sender` seam | Design mandates the library for the wire surface and future media; the seam keeps the send loop testable against a stub without library behavior | Stdlib `sendMessage` calls — reopens the hand-rolled client the design rejected |
 | Constant caps over configuration | Design: tuning knobs are package constants until beta evidence demands otherwise | Env-configurable retry/stall knobs — unreviewed configuration surface |
 | `RestartNotice` bypasses the hold queue (single enqueue, never held) | Parent rule: best-effort within the shutdown deadline | Holding it with terminal classes — loses the best-effort guarantee in the shutdown window |
+| Shutdown ordering: signal → poll loop stops → `Coordinator.Shutdown` → transport `Close` with a bounded drain (in-flight send plus the single-attempt `RestartNotice`) → exit 0 | `handleShutdown` emits `RestartNotice` before the loop closes (`coordinator.go:430`), so a delivery goroutine bound to the cancelled signal context can never deliver it; a transport-owned close deadline also bounds a blocked send inside the shutdown admission | Binding the delivery goroutine to the signal context — loses the restart notice and unbounds the exit |
 
 ### Implementation Constraints
 
@@ -71,6 +72,7 @@ Confirmed decisions the user approved in chat:
 
 - Credentials enter only through environment variables (`TRYGALLE_TELEGRAM_TOKEN`, `TRYGALLE_TELEGRAM_ALLOWED_USER`); diagnostics never print the token, chat ID, or message content. The library already redacts the token in its own debug/error strings.
 - Allowlist enforcement happens before any processing, including before the canned reply is sent.
+- Replies go only to the private chat of the allowlisted user: updates from group or channel chats are dropped before any reply, even when the allowlisted user sent them, so responses never leak to other chat members.
 - Renders carry lifecycle metadata only; no notice embeds prompt bodies or Pi output beyond the coordinator-supplied diagnostic strings for `FailedRun`, `RoutingFailure`, and `SessionResumeFailed` (Pi-generated causes).
 - Long polling is egress-only; nothing listens on the host.
 
@@ -93,9 +95,10 @@ Confirmed decisions the user approved in chat:
 | Send failure, permanent (400/403/404) | Drop with log, no retry | Delivery test |
 | Retry budget exhausted | Log metadata (class, size, attempts), drop content | Delivery test |
 | Held queue over cap | Drop the oldest held terminal message with log | Delivery test |
-| Text over 4096 characters | Chunk at rune boundaries, preferring line breaks | Chunker tests |
+| Text over 4096 UTF-16 code units | Chunk at rune boundaries, preferring line breaks | Chunker tests |
 | Unsupported media update | One canned fixed-string reply; media content unread | Poll test |
-| Send/poll shutdown | Poll loop exits on context cancel; held messages are lost with the process (design-accepted) | Composition test |
+| Send/poll shutdown | Poll loop exits on context cancel; the delivery goroutine stops at the transport's bounded `Close`, which runs after `Coordinator.Shutdown` so the best-effort `RestartNotice` (emitted before the loop closes, `coordinator.go:430`) gets its single attempt; held messages are lost with the process (design-accepted) | Composition test |
+| Coordinator death mid-poll | Poll loop stops on the first non-nil `HandleUserInput` return without advancing the offset; the un-acked update replays after restart; the process exits 1 | Poll test |
 
 ### Rollout and Rollback
 
@@ -106,7 +109,7 @@ Confirmed decisions the user approved in chat:
 ### Acceptance requirements
 
 ### Requirement: Inbound forwarding with allowlist
-The transport SHALL forward the exact text of every message from the allowlisted numeric user to the coordinator's `HandleUserInput` in `update_id` order, and SHALL accept further updates while a run is active (`HandleUserInput` returns after RPC acceptance).
+The transport SHALL forward the exact text of every message from the allowlisted numeric user in a private chat to the coordinator's `HandleUserInput` in `update_id` order, and SHALL accept further updates while a run is active (`HandleUserInput` returns after RPC acceptance).
 
 #### Scenario: Text from the allowed user
 - GIVEN a mock Bot API returning one text message from the allowed user ID
@@ -117,6 +120,11 @@ The transport SHALL forward the exact text of every message from the allowlisted
 - GIVEN a message from a numeric user ID outside the allowlist
 - WHEN the transport polls it
 - THEN no handler call, no outbound send, and no content-bearing log record occurs; only a rejection count is logged
+
+#### Scenario: Allowed user in a group chat (negative)
+- GIVEN a message from the allowlisted user ID arriving in a group chat
+- WHEN the transport polls it
+- THEN no handler call, no outbound send, and only a rejection count is logged
 
 #### Scenario: Reserved command text passes through raw
 - GIVEN the text `/status` from the allowed user
@@ -132,7 +140,7 @@ The transport SHALL poll from update offset 0 at startup without `drop_pending_u
 - THEN both updates are forwarded in ascending `update_id` order before newer polling continues
 
 ### Requirement: Ack-after-handoff offset
-The transport SHALL advance the in-memory offset after `HandleUserInput` returns, so a crash between handoff and acknowledgement re-runs at most the most recent update after restart.
+The transport SHALL advance the in-memory offset after `HandleUserInput` returns nil, so a crash between handoff and acknowledgement re-runs at most the most recent update after restart. A non-nil return (context cancellation or coordinator death; routing failures ack nil) SHALL stop the poll loop without advancing the offset, so the un-acked update replays after the restart.
 
 #### Scenario: Confirmation window
 - GIVEN an update that was handed to the handler but not yet acknowledged, followed by process death
@@ -143,7 +151,7 @@ The transport SHALL advance the in-memory offset after `HandleUserInput` returns
 The transport SHALL produce the final outbound text for every class through one render function: Pi responses as received, and each of the 11 notice kinds using the pinned wording table with payload substitution.
 
 #### Scenario: Notice wording matrix
-- GIVEN the 11 notice kinds with populated payloads (including `Status` idle and active variants, the three `AbortReport` and `NewSessionReport` variants, and `RestartNotice` with empty `Text`)
+- GIVEN the 11 notice kinds with populated payloads (including `Status` idle and active variants, both `AbortReport` variants, all three `NewSessionReport` variants, and `RestartNotice` with empty `Text`)
 - WHEN the transport renders them
 - THEN the output equals the pinned strings, and a `Dropped` payload contributes only a count (`len(Steering)+len(FollowUp)`), never its texts
 
@@ -153,10 +161,10 @@ The transport SHALL produce the final outbound text for every class through one 
 - THEN the text is sent as received, with no escaping state
 
 ### Requirement: Message length chunking
-The transport SHALL split outbound text over 4096 characters at rune boundaries (never splitting a multi-byte character), preferring line breaks, and SHALL send each chunk as one message.
+The transport SHALL split outbound text over 4096 UTF-16 code units (Telegram's limit; astral-plane characters count as two) at rune boundaries (never splitting a multi-byte character), preferring line breaks, and SHALL send each chunk as one message.
 
 #### Scenario: Long multi-byte response
-- GIVEN a Pi response longer than 4096 characters with multi-byte characters around the boundary
+- GIVEN a Pi response longer than 4096 UTF-16 code units with multi-byte characters around the boundary
 - WHEN the transport renders and delivers it
 - THEN Telegram receives adjacent chunks without a broken rune, preferring line-break boundaries
 
@@ -214,7 +222,7 @@ The transport SHALL log a stall diagnostic after a fixed number (5) of consecuti
 - THEN a stall warning is logged once around the threshold, with class metadata only
 
 ### Requirement: Process composition and shutdown
-`cmd/trygalle` SHALL validate env configuration fatally before starting, run the `runtime.Start` ladder, construct the coordinator with the transport, run the poll loop, and on SIGINT/SIGTERM execute `Coordinator.Shutdown` while the transport stops without emitting new notices, exiting 0 within the shutdown admission.
+`cmd/trygalle` SHALL validate env configuration fatally before starting, run the `runtime.Start` ladder, construct the coordinator with the transport, run the poll loop, and on SIGINT/SIGTERM stop the poll loop, run `Coordinator.Shutdown`, then close the transport under a bounded drain window that covers the in-flight send and the single-attempt `RestartNotice`, exiting 0 within the shutdown admission; `Notice`/`Response` calls after transport close are safe drops.
 
 #### Scenario: Missing token
 - GIVEN no `TRYGALLE_TELEGRAM_TOKEN` and valid pi arguments
@@ -224,7 +232,7 @@ The transport SHALL log a stall diagnostic after a fixed number (5) of consecuti
 #### Scenario: Clean signal exit
 - GIVEN a run against a mock pi and mock Bot API
 - WHEN SIGTERM arrives
-- THEN the poll loop stops, `Coordinator.Shutdown` bounds the exit, and the process exits 0
+- THEN the poll loop stops, `Coordinator.Shutdown` bounds the exit, the transport's close delivers the restart notice's single attempt within the drain window, and the process exits 0
 
 ## Test Strategy
 
@@ -239,7 +247,7 @@ Every requirement maps to a seam; the mock Bot API server (httptest, configurabl
 | Non-text replies | Mock Bot API server | Poll integration test asserting exactly one canned send per non-text update |
 | Poll lifecycle, allowlist, 409/401/429, stall, replay, ack window | Transport-owned `getUpdates` HTTP client pointed at the mock server (base URL injectable) | Integration through the real HTTP path |
 | Composition and env validation | Process entry as a testable function over injected env map and stdio | Unit tests for validation and wiring; manual throwaway-bot run covers real end to end |
-| Outbound wire format (the real library end-to-end) | Mock Bot API server hosting the real `*bot.Bot` built with `WithServerURL` and `WithSkipGetMe` (both verified options in v1.27.0) | One integration test through the library path |
+| Outbound wire format and failure classification (the real library end-to-end) | Mock Bot API server hosting the real `*bot.Bot` built with `WithServerURL` and `WithSkipGetMe` (both verified options in v1.27.0) | Integration tests through the library path: the wire format, plus 429-with-`retry_after`, 400, and 5xx responses asserting the transient/permanent classes and `retry_after` extraction — the library wraps errors with `%w` and typed sentinels (`raw_request.go`), so `errors.As` unwrapping is the production path under test |
 
 Mock limitations: the mock server cannot reproduce Telegram's real update schema changes or auth edge subtleties; the manual throwaway-bot run covers those claims. Live Pi contract tests are gated as usual by `TRYGALLE_PI_TESTS` and are unaffected.
 
@@ -256,7 +264,7 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 
 - [ ] Add `github.com/go-telegram/bot v1.27.0` to `go.mod` and record `go.sum`.
 - [ ] Run `go list -m all`; expect exactly `github.com/maruina/trygalle` and `github.com/go-telegram/bot v1.27.0`.
-- [ ] Add package constants with `deliberate:` comments: `maxMessageRunes = 4096`, `maxSendAttempts`, `sendBackoffCap`, `maxHeldTerminal = 50`, `pollStallFailures = 5`.
+- [ ] Add package constants with `deliberate:` comments: `maxMessageUTF16CodeUnits = 4096` (Telegram counts the send limit in UTF-16 code units, not runes), `maxSendAttempts`, `sendBackoffCap`, `maxHeldTerminal = 50`, `pollStallFailures = 5`.
 - [ ] Run `go build ./...`; expect success.
 
 ### Task 2: Renderer with the pinned wording matrix
@@ -266,18 +274,18 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Files:** `internal/telegram/render.go`, `internal/telegram/render_test.go`
 
 - [ ] Add `go test ./internal/telegram -run TestRenderNoticeWording` as the focused failing test (no renderer yet).
-- [ ] Implement the renderer: response passthrough; notice strings verbatim from the design table with these payload rules — `Status` idle uses `SessionID`/`MessageCount`/model with nil model as "unknown"; `Status` active is "Working. Queue <PendingMessageCount>. Model <ModelID>." (decision 2); `Dropped` contributes `len(Steering)+len(FollowUp)` and never its texts; `RestartNotice` renders its fixed wording regardless of empty `Text`; `AbortReport`/`NewSessionReport` prefer the `Text`-marker variants (coordinator emits internal markers) then the `Dropped`-present variant.
+- [ ] Implement the renderer: response passthrough; notice strings verbatim from the design table with these payload rules — `Status` idle uses `SessionID`/`MessageCount`/model with nil model as "unknown", and active discriminates on `State.IsStreaming` (decision 2); `Dropped` contributes `len(Steering)+len(FollowUp)` and never its texts; `RestartNotice` renders its fixed wording regardless of empty `Text`; `AbortReport`/`NewSessionReport` match the coordinator's exact marker strings (`no operation was active`, `session switch cancelled`) first, then discriminate dropped-vs-clean on `len(Steering)+len(FollowUp) > 0` — `Dropped` is a value struct that is always present (`rpc.QueueContents`, `internal/rpc/records.go:121`), so presence cannot discriminate.
 - [ ] Run the command; expect all 12 columns pinned green.
 - [ ] Commit with `feat: pin telegram outbound wording table`.
 
 ### Task 3: Chunker
-**Delivers:** a 4096-character (rune) chunker preferring line boundaries, UTF-8-safe.
+**Delivers:** a 4096 UTF-16-code-unit chunker preferring line boundaries, splitting only at rune boundaries.
 **Blocked by:** Task 1
-**Traces to:** Text over 4096 characters
+**Traces to:** Text over 4096 UTF-16 code units
 **Files:** `internal/telegram/chunker.go`, `internal/telegram/chunker_test.go`
 
 - [ ] Add `go test ./internal/telegram -run TestChunk` as the focused failing test.
-- [ ] Implement; table tests cover: exactly 4096-rune output, over-limit with multi-byte characters (no split rune), line-break preference over mid-line hard splits, trailing empty lines, the chunk count for a long Pi response, and delivery splitting at rune boundaries.
+- [ ] Implement; table tests cover: exactly 4096-unit output, over-limit with multi-byte characters (no split rune), astral-plane characters counting as two units (a message of 4096 emoji runes chunks, because Telegram would reject it with 400 and the permanent-drop class would lose the content), line-break preference over mid-line hard splits, trailing empty lines, the chunk count for a long Pi response, and delivery splitting at rune boundaries.
 - [ ] Run the command; expect green, with no byte-boundary split case.
 - [ ] Commit with `feat: add telegram outbound chunker`.
 
@@ -304,8 +312,8 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Files:** `internal/telegram/poll.go`, `internal/telegram/poll_test.go`, `internal/telegram/mockserver_test.go`
 
 - [ ] Implement the mock Bot API server helper (httptest with scripted `getUpdates` batches and a captured `sendMessage` log) and the `handler` one-method interface (`HandleUserInput(ctx, text) error`) satisfied by `*runtime.Coordinator`.
-- [ ] Add the mock-server-focused failing tests: offset-0 backlog replay, forwarding order, allowlist drop (no content in logs), `/status`-text forwarding verbatim, and the at-least-once window (the offset advances in memory after `HandleUserInput` returns).
-- [ ] Implement: stdlib JSON `getUpdates` client (client timeout = poll timeout + buffer, `allowed_updates` unset, no `drop_pending_updates`), updates decode into `models.Update`, allowlist check before processing, offset in memory advanced post-ack, non-text updates classified centrally to a canned fixed-string reply (sent once per update).
+- [ ] Add the mock-server-focused failing tests: offset-0 backlog replay, forwarding order, allowlist drop (no content in logs), non-private-chat drop, `/status`-text forwarding verbatim, the at-least-once window (the offset advances in memory after a nil `HandleUserInput` return), and the coordinator-death exit (a non-nil handler error stops the loop without advancing the offset; routing failures ack nil, so non-nil means context cancellation or coordinator death).
+- [ ] Implement: stdlib JSON `getUpdates` client (client timeout = poll timeout + buffer, `allowed_updates` unset, no `drop_pending_updates`), updates decode into `models.Update`, allowlist check before processing with replies restricted to `chat.Type == "private"` (group and channel chats drop with a rejection count), offset in memory advanced only after a nil `HandleUserInput` return — a non-nil return stops the loop and propagates on the done channel so `cmd/trygalle` exits 1 and the restart replays the un-acked update — and non-text updates classified centrally to a canned fixed-string reply (sent once per update).
 - [ ] Run `go test ./internal/telegram -race`; expect green.
 - [ ] Commit with `feat: telegram inbound poll loop with allowlist`.
 
@@ -330,7 +338,7 @@ Mock limitations: the mock server cannot reproduce Telegram's real update schema
 **Files:** `cmd/trygalle/main.go`, `cmd/trygalle/main_test.go`
 
 - [ ] Add composition-focused failing tests: missing `TRYGALLE_TELEGRAM_TOKEN` and missing `TRYGALLE_TELEGRAM_ALLOWED_USER` each exit 1 with a non-secret hint; non-numeric allowed-user exits 1; usage exit 2.
-- [ ] Implement: flags mirroring the REPL (`--pi-bin`, `--session-dir`, `--no-continue`, `--heartbeat-interval` 5m, `--shutdown-timeout` 30s); env-only token/allowed-user/poll-timeout (default 30s); `runtime.Start` for pi RPC with trygalle's transport as the `Notifier` (enqueue-only until delivery runs); `Coordinator.Shutdown(context.Background())` after the run loop ends; poll-loop fatal errors propagated on the done channel; exit 0 for clean and signal exits, 1 for fatal runtime errors, 2 for usage.
+- [ ] Implement: flags mirroring the REPL (`--pi-bin`, `--session-dir`, `--no-continue`, `--heartbeat-interval` 5m, `--shutdown-timeout` 30s); env-only token/allowed-user/poll-timeout (default 30s); `runtime.Start` for pi RPC with trygalle's transport as the `Notifier` (enqueue-only until delivery runs); shutdown ordering — the signal stops the poll loop, `Coordinator.Shutdown(context.Background())` runs next, then the transport's bounded `Close` covers the in-flight send and the single-attempt `RestartNotice` before exit 0, with `Notice`/`Response` after close as safe drops; poll-loop fatal errors (409/401 and non-nil handler returns) propagated on the done channel; exit 0 for clean and signal exits, 1 for fatal runtime errors, 2 for usage.
 - [ ] Run `go build ./...`, `go vet ./...`, `go test -race -short ./...`; expect all green. The transport tests are pure unit and httptest, so the CI short job covers them and no `TRYGALLE_PI_TESTS` change is needed.
 - [ ] Commit with `feat: trygalle production target joining coordinator and telegram transport`.
 
