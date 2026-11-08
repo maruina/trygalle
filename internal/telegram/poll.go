@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,13 @@ var _ handler = (*runtime.Coordinator)(nil)
 // joins the configuration surface only when a deployment asks for it.
 const defaultAPIURL = "https://api.telegram.org"
 
+// pollBackoff is the brief pause after a recoverable poll failure (a
+// network error, 5xx, or malformed response); it cannot pin the loop
+// because every wait honours the cancel context.
+// deliberate: a fixed pause; tuning joins the retry constants on beta
+// evidence (follow-up #5).
+const pollBackoff = time.Second
+
 // nonTextReply is the single canned fixed string for media and other
 // non-text updates, kept outside the notice taxonomy (design decision 3:
 // one string, not a media-kind split).
@@ -54,14 +62,21 @@ type poller struct {
 	send   sender
 	handle handler
 	log    *slog.Logger
+
+	// wait sleeps between poll attempts (backoff or retry_after); injected
+	// so tests run instantly.
+	wait func(ctx context.Context, d time.Duration)
 }
 
 // newPoller builds the loop around the stdlib getUpdates client. The HTTP
 // timeout covers the long poll plus a margin, so a stalled connection
-// cannot pin the loop.
-func newPoller(cfg Config, send sender, handle handler, log *slog.Logger) *poller {
+// cannot pin the loop. wait nil selects the default interruptible sleep.
+func newPoller(cfg Config, send sender, handle handler, wait func(ctx context.Context, d time.Duration), log *slog.Logger) *poller {
 	if log == nil {
 		log = slog.Default()
+	}
+	if wait == nil {
+		wait = defaultWait
 	}
 	return &poller{
 		cfg: cfg,
@@ -73,7 +88,32 @@ func newPoller(cfg Config, send sender, handle handler, log *slog.Logger) *polle
 		send:   send,
 		handle: handle,
 		log:    log,
+		wait:   wait,
 	}
+}
+
+// pollConflictError reports a getUpdates failure no retry can fix: another
+// poller holds the token (409, the getUpdates conflict) or the token is
+// unauthorized (401). Both are configuration errors: the composition logs
+// and exits non-zero, and recovery is operator action.
+type pollConflictError struct {
+	code        int
+	description string
+}
+
+func (e *pollConflictError) Error() string {
+	return fmt.Sprintf("telegram: unrecoverable getUpdates HTTP %d: %s", e.code, e.description)
+}
+
+// pollFloodError reports HTTP 429 with Telegram's retry_after backpressure
+// parameter.
+type pollFloodError struct {
+	d           time.Duration
+	description string
+}
+
+func (e *pollFloodError) Error() string {
+	return fmt.Sprintf("telegram: getUpdates backpressure, retry after %s: %s", e.d, e.description)
 }
 
 // Run polls getUpdates until ctx is cancelled (nil return) or a fatal
@@ -81,18 +121,46 @@ func newPoller(cfg Config, send sender, handle handler, log *slog.Logger) *polle
 // drop_pending_updates: a restart replays the un-acked backlog
 // at-least-once. A non-nil handler return stops the loop before the offset
 // advances, so the un-acked update re-runs after a process restart.
+//
+// Failure classes: 409/401 is a configuration conflict and exits non-zero;
+// 429 waits the response's retry_after, then repolls (not a failure, so
+// it never advances the stall counter); anything else backs off briefly,
+// and the fifth consecutive recoverable failure logs the one polling-stall
+// warning.
 func (p *poller) Run(ctx context.Context) error {
 	p.log.InfoContext(ctx, "poll loop started")
 	defer p.log.InfoContext(ctx, "poll loop stopped")
 	offset := int64(0)
+	failures := 0
 	for {
 		updates, err := p.getUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("telegram: getUpdates: %w", err)
+			if conflict, ok := errors.AsType[*pollConflictError](err); ok {
+				p.log.WarnContext(ctx, "poll configuration conflict", "code", conflict.code)
+				return err
+			}
+			if flood, ok := errors.AsType[*pollFloodError](err); ok {
+				p.log.InfoContext(ctx, "poll backpressure", "retry_after", flood.d.Round(time.Second).String())
+				p.wait(ctx, flood.d)
+				if ctx.Err() != nil {
+					return nil
+				}
+				continue
+			}
+			failures++
+			if failures == pollStallFailures {
+				p.log.WarnContext(ctx, "polling stall", "consecutive_failures", failures)
+			}
+			p.wait(ctx, pollBackoff)
+			if ctx.Err() != nil {
+				return nil
+			}
+			continue
 		}
+		failures = 0
 		if offset == 0 && len(updates) > 0 {
 			p.log.InfoContext(ctx, "backlog replay", "updates", len(updates))
 		}
@@ -176,12 +244,41 @@ func (p *poller) getUpdates(ctx context.Context, offset int64) ([]models.Update,
 		Result      []models.Update `json:"result"`
 		ErrorCode   int             `json:"error_code,omitempty"`
 		Description string          `json:"description,omitempty"`
+		Parameters  *struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		return nil, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err)
 	}
 	if !env.Ok {
-		return nil, fmt.Errorf("HTTP %d error %d: %s", resp.StatusCode, env.ErrorCode, env.Description)
+		return nil, classifyPollError(env.ErrorCode, env.Parameters, env.Description, resp.StatusCode)
 	}
 	return env.Result, nil
+}
+
+// classifyPollError sorts one ok:false response into the design's failure
+// taxonomy: 409 and 401 are fatal configuration errors, 429 carries the
+// retry_after backpressure protocol, and every other code is a recoverable
+// failure the loop backs off from.
+func classifyPollError(code int, params *struct {
+	RetryAfter int `json:"retry_after"`
+}, description string, httpStatus int) error {
+	switch code {
+	case http.StatusConflict, http.StatusUnauthorized:
+		// deliberate: classify on the body's error_code, not the HTTP
+		// status, because the serverStatusTransport in the client path has
+		// already turned non-4xx statuses into telegramServerError at this
+		// point. Both shapes wrap Telegram's own codes.
+		return &pollConflictError{code: code, description: description}
+	case http.StatusTooManyRequests:
+		if params == nil || params.RetryAfter <= 0 {
+			break
+		}
+		return &pollFloodError{
+			d:           time.Duration(params.RetryAfter) * time.Second,
+			description: description,
+		}
+	}
+	return fmt.Errorf("HTTP %d error %d: %s", httpStatus, code, description)
 }

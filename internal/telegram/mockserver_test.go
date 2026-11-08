@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -20,8 +21,15 @@ import (
 // batch is a list of one update's JSON; the server wraps the batch in the
 // Bot API envelope. Once exhausted, getUpdates answers an empty result, so
 // the loop keeps long-polling until the test cancels it.
+// pollEntry is one scripted getUpdates call: either a batch of updates or
+// one raw Bot API error body.
+type pollEntry struct {
+	batch []string
+	err   string
+}
+
 type pollServer struct {
-	batches [][]string
+	entries []pollEntry
 	// blocks, when set for an index, delays that getUpdates response until
 	// the channel closes (or the request context ends), so a test can
 	// observe the loop's state between two polls deterministically.
@@ -34,9 +42,9 @@ type pollServer struct {
 	server *httptest.Server
 }
 
-func newPollServer(t testing.TB, batches [][]string, blocks map[int]<-chan struct{}) *pollServer {
+func newPollServer(t testing.TB, entries []pollEntry, blocks map[int]<-chan struct{}) *pollServer {
 	t.Helper()
-	s := &pollServer{batches: batches, blocks: blocks}
+	s := &pollServer{entries: entries, blocks: blocks}
 	s.server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.server.Close)
 	return s
@@ -53,8 +61,12 @@ func (s *pollServer) serve(w http.ResponseWriter, r *http.Request) {
 		i := len(s.offsets)
 		s.offsets = append(s.offsets, r.FormValue("offset"))
 		var body string
-		if i < len(s.batches) {
-			body = `{"ok":true,"result":[` + strings.Join(s.batches[i], ",") + `]}`
+		if i < len(s.entries) {
+			if s.entries[i].err != "" {
+				body = s.entries[i].err
+			} else {
+				body = `{"ok":true,"result":[` + strings.Join(s.entries[i].batch, ",") + `]}`
+			}
 		} else {
 			body = `{"ok":true,"result":[]}`
 		}
@@ -118,6 +130,16 @@ func (s *pollServer) sendChatID(n int) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sends[n]["chat_id"][0]
+}
+
+// botErrorBody is one Bot API error body without the 429 parameters object.
+func botErrorBody(code int, desc string) string {
+	return fmt.Sprintf(`{"ok":false,"error_code":%d,"description":"%s"}`, code, desc)
+}
+
+// botFloodBody is the 429 shape the transport reads retry_after from.
+func botFloodBody(retryAfter int) string {
+	return fmt.Sprintf(`{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":%d}}`, retryAfter)
 }
 
 // newBotAPI builds the reply-path sender against one server URL, matching
