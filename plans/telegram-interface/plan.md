@@ -369,6 +369,16 @@ Task 5 execution notes: the helper builds `bot.New` with the same wiring product
 
 Slice 1 execution notes for Tasks 5–6: both tasks verified clean after implementation, `gofmt -l ./cmd ./internal` empty and `go vet ./...` clean. The two once-drop branches share the same log wording; a helper was declined because each branch sits inline in the outcome switch and stays three lines each.
 
+Slice 1 follow-up (2026-11-08, from /verify finding F1): the retry record (`telegram send retry`, `delivery.go`) joins the observed logs — `TestTransientFailureHoldsThenDelivers` now constructs the transport with a captured logger and asserts three `send retry` records for the three retried attempts plus no message content in the captured records. The red run removed the log line and the new count assertion failed with 0 records; no production change was needed.
+
+F1 follow-up execution (2026-11-08 run):| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `resolve-worktree` | `prompt-required` | Follow-up names the worktree explicitly | Confirmed path, branch `maruina/telegram-interface`, HEAD `eda6be40`, and a clean tree before editing |
+| `skill-loader` | `prompt-required` | Execution template requires it before editing | Routed skills by affected files (`.go` test only; no Kubernetes, `.sh`, Terraform, CLI, or docs changes) |
+| `feature-worktree` | `prompt-required` | Writes must not land on `main` | Continued in the existing feature worktree, base checkout stays on `main` |
+| `go-best-practices` | `skill-loader` | `.go` test file touched | Red-green on the focused test; race, shuffle, and repeat runs as verification |
+| `write` | `agent-selected` | Plan ledger precision | Claim-vs-hedge and evidence rules on the follow-up note above |
+
 ### Slice 2: Inbound pipeline
 **Delivers:** poll loop over the mock Bot API with offset-0 replay, ack-after-handoff, allowlist, raw forwarding including reserved-command text, a canned reply for non-text updates, and the 409/401/429/stall failure classes.
 

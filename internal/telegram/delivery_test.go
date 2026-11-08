@@ -360,7 +360,8 @@ func TestSupersedeHeldStatus(t *testing.T) {
 func TestTransientFailureHoldsThenDelivers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	tt, s := newStubTransport(t, nil, nil, func(ctx context.Context, call int, p *bot.SendMessageParams) (*botmodels.Message, error) {
+	capture, log := newCapture()
+	tt, s := newStubTransport(t, log, nil, func(ctx context.Context, call int, p *bot.SendMessageParams) (*botmodels.Message, error) {
 		if call < 3 {
 			return nil, resetSendError()
 		}
@@ -373,6 +374,12 @@ func TestTransientFailureHoldsThenDelivers(t *testing.T) {
 	}
 	if got := s.delivered(); strings.Join(got, "") != "held answer" {
 		t.Errorf("delivered %q exactly %d times, want the single held answer", got, len(got))
+	}
+	if n := capture.countMsg("send retry"); n != 3 {
+		t.Errorf("retry log records = %d, want one metadata record per retried attempt", n)
+	}
+	if capture.contains("held answer") {
+		t.Error("retry logs leaked message content")
 	}
 }
 
