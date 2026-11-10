@@ -1250,3 +1250,96 @@ func TestNewSessionSequenceErrorEmitsRoutingFailure(t *testing.T) {
 		t.Errorf("response = %q, want %q", got, "final")
 	}
 }
+
+func TestOperationStartedLogsSubmissionForm(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptDisposition = rpc.DispositionStarted
+	capture := &logCapture{}
+	c := runtime.NewCoordinator(f, n, runtime.DefaultConfig(), capture.logger())
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "start a run"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	rec := capture.waitFor(t, "operation started")
+	if got := rec.attrs["input"]; got != "prompt" {
+		t.Errorf("operation started input = %q, want %q", got, "prompt")
+	}
+}
+
+func TestSteerRetryLogsSubmissionForm(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	f.promptErr = &rpc.CommandError{Command: "prompt", Message: "cannot prompt during compaction"}
+	f.steerDisposition = rpc.DispositionStarted
+	capture := &logCapture{}
+	c := runtime.NewCoordinator(f, n, runtime.DefaultConfig(), capture.logger())
+	defer c.Close()
+
+	if err := c.HandleUserInput(context.Background(), "hi"); err != nil {
+		t.Fatalf("HandleUserInput: %v", err)
+	}
+	rec := capture.waitFor(t, "operation started")
+	if got := rec.attrs["input"]; got != "steer-retry" {
+		t.Errorf("operation started input = %q, want %q", got, "steer-retry")
+	}
+}
+
+func TestReservedCommandLogsCommandName(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	capture := &logCapture{}
+	c := runtime.NewCoordinator(f, n, runtime.DefaultConfig(), capture.logger())
+	defer c.Close()
+
+	f.onClearQueue = func() {}
+	if err := c.HandleUserInput(context.Background(), "/abort"); err != nil {
+		t.Fatalf("HandleUserInput(/abort): %v", err)
+	}
+	rec := capture.waitFor(t, "reserved command started")
+	if got := rec.attrs["command"]; got != "/abort" {
+		t.Errorf("reserved command started command = %q, want %q", got, "/abort")
+	}
+}
+
+func TestAgentReplyMilestonesLogged(t *testing.T) {
+	f := newFakeClient()
+	n := newRecordingNotifier()
+	capture := &logCapture{}
+	c := runtime.NewCoordinator(f, n, runtime.DefaultConfig(), capture.logger())
+	defer c.Close()
+	startRunningOperation(t, f, c)
+
+	f.events <- rpc.Event{Type: "turn_start"}
+	f.events <- rpc.Event{Type: "message_end", Message: &rpc.Message{Role: "assistant"}}
+	f.events <- rpc.Event{Type: "turn_end"}
+	f.events <- rpc.Event{Type: "compaction_start"}
+	f.events <- rpc.Event{Type: "compaction_end"}
+	f.events <- rpc.Event{Type: "auto_retry_start", Reason: "provider 500"}
+	f.events <- rpc.Event{Type: "auto_retry_end"}
+
+	for _, tc := range []struct {
+		msg  string
+		attr string
+		want string
+	}{
+		{msg: "turn started"},
+		{msg: "turn ended"},
+		{msg: "compaction started"},
+		{msg: "compaction ended"},
+		{msg: "pi auto-retry started", attr: "reason", want: "provider 500"},
+		{msg: "pi auto-retry ended"},
+	} {
+		rec := capture.waitFor(t, tc.msg)
+		if tc.attr != "" && rec.attrs[tc.attr] != tc.want {
+			t.Errorf("%s %s = %q, want %q", tc.msg, tc.attr, rec.attrs[tc.attr], tc.want)
+		}
+	}
+	// message_end stays unlogged at info: turn boundaries mark progress.
+	for _, rec := range capture.snapshot() {
+		if rec.msg == "message_end" || strings.Contains(rec.msg, "session event") {
+			t.Errorf("per-message or debug event leaked at info: %q", rec.msg)
+		}
+	}
+}

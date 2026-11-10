@@ -5,6 +5,13 @@ import (
 	"fmt"
 )
 
+// Submission forms the coordinator logs on "operation started": metadata
+// only, never the message text.
+const (
+	inputPrompt     = "prompt"
+	inputSteerRetry = "steer-retry"
+)
+
 func (c *Coordinator) handleResult(cmd coordCommand) {
 	if c.pending == nil || c.pending != cmd.op {
 		cmd.ack <- errNoPendingInput
@@ -110,6 +117,7 @@ func (c *Coordinator) handleNew(cmd coordCommand) {
 // the prompt-failure pattern; neither path is silent. The query never touches
 // operation state: status observes the run without disturbing it (R11).
 func (c *Coordinator) handleStatus(cmd coordCommand) {
+	c.log.Info("status query")
 	if cmd.err != nil {
 		c.log.Error("get_state failed", "error", cmd.err)
 		c.notifier.Notice(context.Background(), Notice{Kind: NoticeRoutingFailure, Text: cmd.err.Error()})
@@ -121,7 +129,7 @@ func (c *Coordinator) handleStatus(cmd coordCommand) {
 }
 
 func (c *Coordinator) handleStarted(pending *operation, cmd coordCommand) {
-	if !c.startOperation(pending) {
+	if !c.startOperation(pending, cmd.input) {
 		cmd.ack <- nil
 		return
 	}
@@ -168,7 +176,7 @@ func (c *Coordinator) handleHandled(pending *operation, cmd coordCommand) {
 	case pending.hasRun:
 		// The extension run's agent_start was observed (or already drained)
 		// before the response: track the run to its own agent_settled.
-		c.startOperation(pending)
+		c.startOperation(pending, inputPrompt)
 		if pending.settled {
 			c.settleCurrentOperation()
 		}

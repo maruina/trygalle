@@ -14,11 +14,18 @@ import (
 // Session event types the coordinator consumes for state transitions. All
 // other state events are metadata only.
 const (
-	eventAgentStart   = "agent_start"
-	eventAgentEnd     = "agent_end"
-	eventAgentSettled = "agent_settled"
-	eventTurnEnd      = "turn_end"
-	eventMessageEnd   = "message_end"
+	eventAgentStart             = "agent_start"
+	eventAgentEnd               = "agent_end"
+	eventAgentSettled           = "agent_settled"
+	eventTurnStart              = "turn_start"
+	eventTurnEnd                = "turn_end"
+	eventMessageEnd             = "message_end"
+	eventCompactionStart        = "compaction_start"
+	eventCompactionEnd          = "compaction_end"
+	eventQueueUpdate            = "queue_update"
+	eventAutoRetryStart         = "auto_retry_start"
+	eventAutoRetryEnd           = "auto_retry_end"
+	eventSummarizationScheduled = "summarization_retry_scheduled"
 )
 
 // stopReasonError marks a failed assistant message (rpc.md message types).
@@ -78,6 +85,8 @@ type coordCommand struct {
 	kind        cmdKind
 	op          *operation // the submission this begin or result belongs to
 	disposition Disposition
+	input       string        // the submission form the loop logs: prompt or steer-retry
+	command     string        // the reserved command name for cmdReserve
 	status      State         // the /status query outcome for cmdStatus
 	dropped     QueueContents // the clear_queue outcome for cmdAbort and cmdNew
 	cancelled   bool          // the new_session outcome for cmdNew
@@ -186,6 +195,7 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 	// submit identifies this handshake, so a late or compensating result
 	// command can only clear the pending submit it belongs to.
 	submit := &operation{}
+	input := inputPrompt
 	if err := c.sendCommand(ctx, coordCommand{kind: cmdBegin, op: submit}); err != nil {
 		if ctx.Err() != nil {
 			// The caller gave up after the begin may have registered the
@@ -205,11 +215,12 @@ func (c *Coordinator) HandleUserInput(ctx context.Context, text string) error {
 		// canceled caller may already have delivered the prompt.
 		c.log.Info("prompt rejected; retrying once with bare steer", "error", err)
 		disposition, err = c.client.Steer(ctx, text)
+		input = inputSteerRetry
 	}
 	// The result handshake uses a coordinator-owned context: the loop must
 	// learn the outcome even when the caller gave up, or pending state strands
 	// and every later input fails errInputInFlight.
-	return c.sendResult(context.Background(), submit, disposition, err)
+	return c.sendResult(context.Background(), submit, disposition, input, err)
 }
 
 // isCommandRejection reports whether Pi explicitly rejected the prompt, the
@@ -219,8 +230,8 @@ func isCommandRejection(err error) bool {
 	return errors.As(err, &cmdErr)
 }
 
-func (c *Coordinator) sendResult(ctx context.Context, op *operation, d Disposition, err error) error {
-	return c.sendCommand(ctx, coordCommand{kind: cmdResult, op: op, disposition: d, err: err})
+func (c *Coordinator) sendResult(ctx context.Context, op *operation, d Disposition, input string, err error) error {
+	return c.sendCommand(ctx, coordCommand{kind: cmdResult, op: op, disposition: d, input: input, err: err})
 }
 
 // sendCommand hands one internal command to the event loop and waits for its
@@ -259,7 +270,7 @@ func (c *Coordinator) terminalError() error {
 // single terminal outcome (R12). An idle /abort still runs the sequence,
 // mirroring Esc on an idle session.
 func (c *Coordinator) handleAbortRequest(ctx context.Context) error {
-	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve}); err != nil {
+	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve, command: "/abort"}); err != nil {
 		return c.closeAbandonedWindow(ctx, err, cmdAbort)
 	}
 	dropped, err := c.clearQueueAndAbort(ctx)
@@ -298,7 +309,7 @@ func (c *Coordinator) clearQueueAndAbort(ctx context.Context) (QueueContents, er
 // steering queue, then switch to a new session, then post the sequence
 // outcome so the loop alone owns the supersede transition (R13).
 func (c *Coordinator) handleNewRequest(ctx context.Context) error {
-	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve}); err != nil {
+	if err := c.sendCommand(ctx, coordCommand{kind: cmdReserve, command: "/new"}); err != nil {
 		return c.closeAbandonedWindow(ctx, err, cmdNew)
 	}
 	dropped, cancelled, err := c.clearQueueAndNewSession(ctx)
@@ -437,6 +448,7 @@ func (c *Coordinator) handleReserve(cmd coordCommand) {
 	}
 	c.reserved = true
 	c.reservedHadOp = c.op != nil
+	c.log.Info("reserved command started", "command", cmd.command)
 	cmd.ack <- nil
 }
 
@@ -495,7 +507,7 @@ func (c *Coordinator) drainEvents() {
 // A post-/new suppression survives a new operation start: only the next
 // agent_start re-arms attribution, so a late settle from the superseded run
 // can never complete the new operation (R13).
-func (c *Coordinator) startOperation(pending *operation) bool {
+func (c *Coordinator) startOperation(pending *operation, input string) bool {
 	if c.op != nil {
 		c.log.Error("prompt started a second run while an operation is running")
 		return false
@@ -506,7 +518,7 @@ func (c *Coordinator) startOperation(pending *operation) bool {
 		c.state = stateRunning
 	}
 	c.startHeartbeat()
-	c.log.Info("operation started")
+	c.log.Info("operation started", "input", input)
 	return true
 }
 
@@ -574,10 +586,28 @@ func (c *Coordinator) handleEvent(e Event) {
 	switch e.Type {
 	case eventAgentStart:
 		c.noteAgentStart()
+		c.log.Info("agent started")
 	case eventAgentSettled:
 		c.noteSettled()
-	case eventMessageEnd, eventTurnEnd:
+	case eventTurnStart:
+		c.log.Info("turn started")
+	case eventTurnEnd:
 		c.noteMessage(e.Message)
+		c.log.Info("turn ended")
+	case eventMessageEnd:
+		// Per-message milestones stay unlogged: a run can carry dozens, and
+		// the turn boundaries already mark the agent's progress.
+		c.noteMessage(e.Message)
+	case eventCompactionStart:
+		c.log.Info("compaction started")
+	case eventCompactionEnd:
+		c.log.Info("compaction ended")
+	case eventAutoRetryStart:
+		c.log.Info("pi auto-retry started", "reason", e.Reason)
+	case eventAutoRetryEnd:
+		c.log.Info("pi auto-retry ended")
+	case eventSummarizationScheduled:
+		c.log.Info("summarization retry scheduled")
 	case eventAgentEnd:
 		for i := range e.Messages {
 			c.noteMessage(&e.Messages[i])
@@ -586,7 +616,7 @@ func (c *Coordinator) handleEvent(e Event) {
 			c.log.Info("agent ended; pi will retry")
 		}
 	default:
-		// Compaction, retry, and queue events: metadata only, no content.
+		// Queue and any unknown event types: metadata only, no content.
 		c.log.Debug("session event", "type", e.Type)
 	}
 }
