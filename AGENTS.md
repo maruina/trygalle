@@ -9,7 +9,9 @@ Reference for building, testing, and changing this repository.
 | `internal/rpc` | JSONL framing, protocol records, and the Pi RPC client |
 | `internal/runtime` | Coordinator event loop, operation state machine, reserved commands, startup ladder, shutdown |
 | `internal/harness` | Live-test gate, mock model server, and synthetic test extension |
+| `internal/telegram` | Telegram transport: outbound rendering and delivery, inbound poll loop, offset discipline, and the numeric allowlist |
 | `cmd/trygalle-repl` | Dev-only REPL demo binary |
+| `cmd/trygalle` | Production binary joining the coordinator and the Telegram transport |
 | `plans/` | Committed design and plan records |
 
 ## Build and test
@@ -57,7 +59,8 @@ The supported version is `1.3.0`, declared as `harness.PinnedPiVersion`. The liv
 - One coordinator event loop is the only consumer of the client event and extension-UI channels, and the only writer of operation state.
 - Every reserved command and the shutdown sequence runs as a loop command: the caller performs the bounded RPC sequence and posts the outcome, and the loop alone writes state and emits the notice.
 - `agent_settled` is the only completion signal; `agent_end` with `willRetry: true` is not.
-- The component uses the Go standard library only. Do not add third-party dependencies.
+- The `internal/rpc`, `internal/runtime`, and `internal/harness` packages use the Go standard library only. The `internal/telegram` transport adds exactly one third-party dependency, pinned: `github.com/go-telegram/bot`. Do not add others; changing or upgrading the pin is a plan-record amendment in the same change as `go.mod`.
+- The pinned library's only polling surface (`bot.Start`) advances its offset before handlers run and treats `getUpdates` conflicts as retryable. The transport-owned poll loop in `internal/telegram/poll.go` is the load-bearing offset discipline and failure taxonomy; do not replace it with the library's poller.
 - Do not use `bufio.Scanner` in the protocol framing path; its default 64 KiB limit breaks long records.
 
 ## REPL demo
