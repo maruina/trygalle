@@ -13,7 +13,7 @@ import (
 )
 
 // Constants for the synthetic model registered through the generated
-// models.json. The provider key is "mock"; Pi 1.3.0 accepts it and lists the
+// models.json. The provider key is "mock"; the pinned Pi accepts it and lists the
 // model under --provider mock (verified live; the ollama fallback was not
 // needed).
 const (
@@ -34,7 +34,7 @@ const (
 	behaveFailAlways
 )
 
-// overflowErrorMessage matches a context-window overflow as Pi 1.3.0 detects it
+// overflowErrorMessage matches a context-window overflow as the pinned Pi detects it
 // from an OpenAI-compatible provider error.
 const overflowErrorMessage = "This model's maximum context length is 8000 tokens. However, your messages resulted in 9000 tokens."
 
@@ -105,7 +105,7 @@ func (m *MockModel) FailAlways() {
 }
 
 // OverflowOnce scripts one context-overflow error for the next request. Pi
-// 1.3.0 classifies it as context overflow, compacts, and retries the turn
+// The pinned Pi classifies it as context overflow, compacts, and retries the turn
 // once, which is the only live path that opens a compaction window inside a
 // run (a manual compact aborts the run instead).
 func (m *MockModel) OverflowOnce() {

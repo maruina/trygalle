@@ -45,13 +45,13 @@ A binary that exists but cannot report `--version` fails in every mode.
 Run the full suite against the pin:
 
 ```bash
-npm install --global @earendil-works/pi-coding-agent@1.3.0
+npm install --global @earendil-works/pi-coding-agent@1.5.2
 TRYGALLE_PI_TESTS=on go test -race ./...
 ```
 
 ## Pinned Pi version
 
-The supported version is `1.3.0`, declared as `harness.PinnedPiVersion`. The live suite is the upgrade evidence gate: changing the pin requires the complete live suite green against the new version, and the pin, the plan records, and `.github/workflows/ci.yml` must move in one change. Do not weaken the version check to make a test pass.
+The supported version is `1.5.2`, declared as `harness.PinnedPiVersion`. The live suite is the upgrade evidence gate: changing the pin requires the complete live suite green against the new version, and the pin, the plan records, and `.github/workflows/ci.yml` must move in one change. Do not weaken the version check to make a test pass.
 
 ## Architecture constraints
 
@@ -76,6 +76,6 @@ The REPL is a developer surface, not the container entrypoint. It reads stdin li
 `.github/workflows/ci.yml` runs two jobs on every pull request and push to `main`:
 
 - Short: `go test -race -short ./...`, where live tests skip by design.
-- Full: installs pi 1.3.0, sets `TRYGALLE_PI_TESTS=on`, and runs `go test -race ./...`.
+- Full: installs pi 1.5.2, sets `TRYGALLE_PI_TESTS=on`, and runs `go test -race ./...`.
 
 A daily scheduled run repeats the full suite.

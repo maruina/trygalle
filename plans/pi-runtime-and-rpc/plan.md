@@ -757,6 +757,14 @@ Delivers deterministic SIGTERM behavior, the docs, and the feature-level gate.
 
 **Coverage honesty note:** any terminal state the live tier cannot produce deterministically (candidates: "settled, no text" if the mock model's empty response is normalized away by Pi) gets a scripted-fake unit test instead, named in the relevant task's notes during execution. No coverage gap is left silent.
 
+### Pin bump 1.3.0 → 1.5.2 (2026-11-10)
+
+| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `skill-loader` | `prompt-required` | The bump touches Go, YAML, and prose | Loaded `go-best-practices` for the harness edits; no new language surface |
+
+The pin, `harness.PinnedPiVersion`, `.github/workflows/ci.yml`, and `AGENTS.md` moved in one change. Observed-behavior comments in `internal/harness` (`mock` provider acceptance, overflow classification, the empty-text representation) now name "the pinned Pi" — the full live suite re-verifies them, so the observations transferred without edit beyond the wording. Evidence: `TRYGALLE_PI_TESTS=on TRYGALLE_PI_BIN=$(command -v pi) go test -race -count=1 ./...` green module-wide against local pi 1.5.2, and the negative gate holds: a binary reporting 1.4.0 fails with `pi version "1.4.0" does not match the pinned version 1.5.2`. Historical task text keeps its 1.3.0 wording — it records what the tasks observed at the time; the goal and Tech Stack lines carry the original plan baseline. A renovate regex manager for future bump PRs is a recorded follow-up, not part of this change.
+
 ## Assumptions and Risks
 - Pi 1.3.0 is the pinned version; the harness checks `pi --version` before live tests. Contract tests double as the local upgrade gate; CI workflow enforcement is a separate follow-up because this plan excludes CI configuration.
 - The mock model's wire shape is discovered in Task 5 by logging one real request; the OpenAI-compatible surface is small and Pi routes local servers through this path by design (Ollama/vLLM support).

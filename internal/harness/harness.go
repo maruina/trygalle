@@ -23,14 +23,14 @@ import (
 // the upgrade evidence gate: bumping pi requires this constant and the whole
 // live suite to move together.
 const (
-	PinnedPiVersion = "1.3.0"
+	PinnedPiVersion = "1.5.2"
 	envTests        = "TRYGALLE_PI_TESTS"
 	envBin          = "TRYGALLE_PI_BIN"
 )
 
 // TRYGALLE_PI_TESTS mode values.
 const (
-	ModeAuto = "auto" // default (local): run with Pi 1.3.0; skip with instructions when pi is missing or another version
+	ModeAuto = "auto" // default (local): run with the pinned version; skip with instructions when pi is missing or another version
 	ModeOn   = "on"   // CI: fail when pi is missing or the version differs from the pin
 	ModeOff  = "off"  // always skip, before any binary lookup
 )
