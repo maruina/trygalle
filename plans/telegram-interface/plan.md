@@ -35,6 +35,7 @@
 | `skill-loader` | `prompt-required` | Select execution skills before editing | Loaded `go-best-practices` (new Go files, testing and concurrency references read); `write` for the ledger prose; no Kubernetes, CLI, script, or Terraform triggers |
 | `go-best-practices` | `skill-loader` | `poll.go` and the two test files created | Consumer-owned `handler` seam in the transport package; deterministic inter-poll observation through the mock server's block channel; at-least-once offset advanced only after a nil handler return; `-race`, `-shuffle=on`, `go fix -diff`, and gofmt clean before the commit |
 | `write` | `agent-selected` | The plan ledger is a prose artifact | Applied to the Task 7 status notes |
+| `go-best-practices` | `skill-loader` | 2026-11-10 Task 10 follow-up: coordinator logging improved | Added operation attribution (`operation started` with `input` prompt/steer-retry, `reserved command started` with the command name, `status query`) and agent-reply milestone logs (`agent started`, turn boundaries, compaction, auto-retry at info; per-`message_end` stays unlogged); four focused log tests; the full state-machine suite falsified a dropped `agent_settled` case in the first cut before commit |
 
 ## Planning alignment brief (confirmed 2026-11-08)
 
