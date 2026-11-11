@@ -438,8 +438,17 @@ Task 9 execution notes: the novel decision is the goroutine budget — the poll 
 **Traces to:** Rollout and Rollback (operator acceptance), all behavior requirements at a real boundary
 **Files:** none (operator run)
 
-- [ ] Run with a throwaway bot token and private chat: text round trip; steering during a run (a second text merges into the run's single response); `/status` mid-run; `/abort` mid-run; `/new`; downtime replay after a stop-start; an unsolicited photo replying with the canned string; kill-and-restart during a run to observe the ack window's duplicate re-run.
-- [ ] Record evidence in the slice's pull request or completion report; no token, chat ID, or message content may be committed.
+- [x] Run with a throwaway bot token and private chat: text round trip; steering during a run (a second text merges into the run's single response); `/status` mid-run; `/abort` mid-run; `/new`; downtime replay after a stop-start; an unsolicited photo replying with the canned string; kill-and-restart during a run to observe the ack window's duplicate re-run. Verified 2026-11-11 on the local machine against the real Bot API and the pinned pi 1.5.2, driven by the operator (sender) with the bridge process and log timeline driven from the worktree (log timestamps below, times CET):
+  - *Text round trip* — 13:51:47 `operation started` → 13:51:52 settled; the response arrived in the chat.
+  - *Steering mid-run* — the 13:52:50 story run absorbed a second text as queued steering: four turn cycles, no second `operation started`, one settle at 13:53:52.
+  - *`/status` mid-run* — `status query` at 13:53:xx; chat reply `Working. Queue 0. Model glm-5.3-flash.` matches the pinned wording.
+  - *`/abort` mid-run* — `reserved command started command=/abort` → `operation aborted`; chat reply `Aborted. Dropped 0 queued inputs.`
+  - *`/new` mid-run* — twice (14:11:37 and 14:12:22): `operation settled during a reserved command; outcome deferred` → `discarding the outcome replaced by a reserved command` → `session superseded`; chat reply `New session started.` is the single terminal outcome.
+  - *Downtime replay* — three `backlog replay` events (13:51:46, 14:09:39, 14:30:22), each replaying updates that arrived while no poller held the connection.
+  - *Unsolicited photo* — exactly one canned reply (`nonTextReply` wording) at 14:10; success is log-silent by design.
+  - *Kill-and-restart ack window* — two attempts. A SIGKILL ~20 s after handling replayed nothing: the next poll had already confirmed the update server-side, empirically bounding the window at one round trip. The second attempt raced the handler return with a log watcher: `operation started` at 14:39:03.130, SIGKILL at 14:39:03.150 — inside the designed window — and the update still never replayed: the confirming poll outran the kill on the keep-alive connection. Conclusion recorded for the design: the at-least-once window is real but effectively sub-20 ms; the offset-0 replay mechanism itself is separately proven by the three downtime replays, and the handler-error-stops-without-advancing behavior is pinned by the Task 7 unit test.
+  - Incidental live evidence: a restart overlapping a graceful shutdown produced a real 409, and the conflicted poller exited 1 with `poll configuration conflict` (Task 8's fail-loud semantics at the real boundary).
+- [x] Record evidence in the slice's pull request or completion report; no token, chat ID, or message content may be committed. Verified: the evidence above carries timestamps and log lines only; the bot token lives in a 0600 env file outside the repository and never entered chat or logs; chat identifiers and message texts are excluded; the bridge-side user id appears only as the config value the tests already pin.
 
 ### Slice 4: Documentation and final verification
 **Delivers:** repository docs carry the dependency amendment and runnable surface; full verification green.
@@ -457,9 +466,9 @@ Task 9 execution notes: the novel decision is the goroutine budget — the poll 
 Task 11 execution note: Task 11's plan ordering waits on Task 10's operator run, and the run is still pending — the docs describe the committed runnable surface, so they were drafted ahead of the acceptance evidence, and the feature-level acceptance row (Task 10's recorded checklist) stays open in the final-verification section until the run happens. No content depends on the run's outcome.
 
 ### Final verification
-- [ ] `go build ./...`, `go vet ./...`, `gofmt -l ./cmd ./internal`, `go fix -diff ./...`, `go test -race -shuffle=on ./...` all green.
-- [ ] `go list -m all` still shows exactly one third-party module, pinned.
-- [ ] Feature-level acceptance: the full wording matrix and mock-server lifecycle tests green, the single third-party dependency still pinned, and the manual throwaway-bot checklist from Task 10 recorded.
+- [x] `go build ./...`, `go vet ./...`, `gofmt -l ./cmd ./internal`, `go fix -diff ./...`, `go test -race -shuffle=on ./...` all green. Verified 2026-11-11 after the typing-refresh commit: module-wide green incl. live tier on the pinned pi 1.5.2; `go vet` and `go fix -diff` clean; `gofmt -l ./cmd ./internal` empty.
+- [x] `go list -m all` still shows exactly one third-party module, pinned. Verified: `github.com/go-telegram/bot v1.27.0` and the module root only.
+- [x] Feature-level acceptance: the full wording matrix and mock-server lifecycle tests green, the single third-party dependency still pinned, and the manual throwaway-bot checklist from Task 10 recorded. Verified: Task 10's checklist is recorded above with timestamps; the wording matrix and poll lifecycle tests are green in the final suite state; the single dependency is pinned.
 
 ## Learning candidates
 
