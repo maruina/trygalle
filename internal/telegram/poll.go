@@ -116,6 +116,12 @@ func (e *pollFloodError) Error() string {
 	return fmt.Sprintf("telegram: getUpdates backpressure, retry after %s: %s", e.d, e.description)
 }
 
+// pollRetryParams is Telegram's retry_after backpressure object on a 429
+// getUpdates response.
+type pollRetryParams struct {
+	RetryAfter int `json:"retry_after"`
+}
+
 // Run polls getUpdates until ctx is cancelled (nil return) or a fatal
 // failure surfaces. The loop starts at offset 0 without
 // drop_pending_updates: a restart replays the un-acked backlog
@@ -250,13 +256,11 @@ func (p *poller) getUpdates(ctx context.Context, offset int64) ([]models.Update,
 	}
 	defer resp.Body.Close()
 	var env struct {
-		Ok          bool            `json:"ok"`
-		Result      []models.Update `json:"result"`
-		ErrorCode   int             `json:"error_code,omitempty"`
-		Description string          `json:"description,omitempty"`
-		Parameters  *struct {
-			RetryAfter int `json:"retry_after"`
-		} `json:"parameters,omitempty"`
+		Ok          bool             `json:"ok"`
+		Result      []models.Update  `json:"result"`
+		ErrorCode   int              `json:"error_code,omitempty"`
+		Description string           `json:"description,omitempty"`
+		Parameters  *pollRetryParams `json:"parameters,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		return nil, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err)
@@ -271,9 +275,7 @@ func (p *poller) getUpdates(ctx context.Context, offset int64) ([]models.Update,
 // taxonomy: 409 and 401 are fatal configuration errors, 429 carries the
 // retry_after backpressure protocol, and every other code is a recoverable
 // failure the loop backs off from.
-func classifyPollError(code int, params *struct {
-	RetryAfter int `json:"retry_after"`
-}, description string, httpStatus int) error {
+func classifyPollError(code int, params *pollRetryParams, description string, httpStatus int) error {
 	switch code {
 	case http.StatusConflict, http.StatusUnauthorized:
 		// deliberate: classify on the body's error_code, not the HTTP

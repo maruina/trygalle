@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// commandErr runs command with one environment mapping and returns whether
-// the error is the usage kind plus its rendered exit message.
-func commandExit(t testing.TB, getenv func(string) string) (bool, string) {
+// commandExit runs command with one environment mapping and requires a
+// runtime-fatal outcome, returning the rendered exit message.
+func commandExit(t testing.TB, getenv func(string) string) string {
 	t.Helper()
 	var stderr bytes.Buffer
 	err := command(context.Background(),
@@ -22,13 +22,12 @@ func commandExit(t testing.TB, getenv func(string) string) (bool, string) {
 	if errors.Is(err, errUsage) {
 		t.Fatalf("command() error = %v, want a runtime fatal, not usage", err)
 	}
-	return false, err.Error()
+	return err.Error()
 }
 
 func TestMissingTokenExitsFatalWithHint(t *testing.T) {
 	t.Parallel()
-	fatal, msg := commandExit(t, func(string) string { return "" })
-	_ = fatal
+	msg := commandExit(t, func(string) string { return "" })
 	if !strings.Contains(msg, "TRYGALLE_TELEGRAM_TOKEN") {
 		t.Errorf("exit message %q, want the non-secret token hint", msg)
 	}
@@ -39,13 +38,12 @@ func TestMissingTokenExitsFatalWithHint(t *testing.T) {
 
 func TestMissingAllowedUserExitsFatalWithHint(t *testing.T) {
 	t.Parallel()
-	fatal, msg := commandExit(t, func(k string) string {
+	msg := commandExit(t, func(k string) string {
 		if k == "TRYGALLE_TELEGRAM_TOKEN" {
 			return "1:test-token"
 		}
 		return ""
 	})
-	_ = fatal
 	if !strings.Contains(msg, "TRYGALLE_TELEGRAM_ALLOWED_USER") {
 		t.Errorf("exit message %q, want the non-secret allowed-user hint", msg)
 	}
@@ -53,7 +51,7 @@ func TestMissingAllowedUserExitsFatalWithHint(t *testing.T) {
 
 func TestNonNumericAllowedUserExitsFatal(t *testing.T) {
 	t.Parallel()
-	fatal, msg := commandExit(t, func(k string) string {
+	msg := commandExit(t, func(k string) string {
 		if k == "TRYGALLE_TELEGRAM_TOKEN" {
 			return "1:test-token"
 		}
@@ -62,7 +60,6 @@ func TestNonNumericAllowedUserExitsFatal(t *testing.T) {
 		}
 		return ""
 	})
-	_ = fatal
 	if !strings.Contains(msg, "TRYGALLE_TELEGRAM_ALLOWED_USER") {
 		t.Errorf("exit message %q, want the allowed-user hint", msg)
 	}

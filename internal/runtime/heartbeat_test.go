@@ -128,9 +128,6 @@ func TestHeartbeatBeforeAnyEventCarriesNoActivity(t *testing.T) {
 	var hb runtime.Notice
 	for hb.Kind != runtime.NoticeHeartbeat {
 		hb = <-n.notices
-		if hb.Kind == runtime.NoticeWorking {
-			hb = runtime.Notice{}
-		}
 	}
 	if hb.LastActivity.Type != "" {
 		t.Errorf("LastActivity.Type = %q, want empty before any event", hb.LastActivity.Type)
