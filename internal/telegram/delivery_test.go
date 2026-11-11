@@ -45,7 +45,27 @@ type stubSender struct {
 	calls   int
 	sent    []string // texts recorded at successful send return
 	chatIDs []int64
-	fn      func(ctx context.Context, call int, p *bot.SendMessageParams) (*botmodels.Message, error)
+	// chatActionIDs records the chat of each sendChatAction call.
+	chatActionIDs []int64
+	fn            func(ctx context.Context, call int, p *bot.SendMessageParams) (*botmodels.Message, error)
+}
+
+// SendChatAction records the chat and reports success, so tests count the
+// typing indicator pulses the transport makes.
+func (s *stubSender) SendChatAction(_ context.Context, p *bot.SendChatActionParams) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := p.ChatID.(int64); ok {
+		s.chatActionIDs = append(s.chatActionIDs, id)
+	}
+	return true, nil
+}
+
+// chatActionCount returns how many typing pulses reached the wire.
+func (s *stubSender) chatActionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.chatActionIDs)
 }
 
 // SendMessage advances the call index and records a successful send, so
@@ -81,6 +101,16 @@ func (s *stubSender) callsMade() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls
+}
+
+// chatActionID returns the chat of the first typing pulse.
+func (s *stubSender) chatActionID() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.chatActionIDs) == 0 {
+		return 0
+	}
+	return s.chatActionIDs[0]
 }
 
 // chatID returns the recorded chat of the first successful send.

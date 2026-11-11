@@ -24,6 +24,11 @@ func awaitRunResponse(t *testing.T, n *recordingNotifier) string {
 		case text := <-n.responses:
 			return text
 		case notice := <-n.notices:
+			// Working pulses are run activity; only ExtensionHandled is the
+			// outcome the pinned scenario asserts.
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
 			if notice.Kind != runtime.NoticeExtensionHandled {
 				t.Fatalf("unexpected notice %q before the run response", notice.Kind)
 			}
@@ -100,14 +105,21 @@ func TestLiveExtensionNotifyLoggedOnly(t *testing.T) {
 
 	// /mock-notify starts no run, so its only outcome is the handled-no-run
 	// notice; the notification body is never delivered.
-	select {
-	case text := <-n.responses:
-		t.Fatalf("notification delivered a response %q", text)
-	case notice := <-n.notices:
-		if notice.Kind != runtime.NoticeEmptyResponse {
-			t.Fatalf("unexpected notice %q after /mock-notify", notice.Kind)
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case text := <-n.responses:
+			t.Fatalf("notification delivered a response %q", text)
+		case notice := <-n.notices:
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
+			if notice.Kind != runtime.NoticeEmptyResponse {
+				t.Fatalf("unexpected notice %q after /mock-notify", notice.Kind)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no outcome for /mock-notify within 30s")
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("no outcome for /mock-notify within 30s")
 	}
 }

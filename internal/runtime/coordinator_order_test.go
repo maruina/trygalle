@@ -42,7 +42,14 @@ func TestHandledResultBeforeBufferedStartKeepsAttribution(t *testing.T) {
 	if c.op != pending || !pending.hasRun {
 		t.Fatal("buffered extension run lost its operation")
 	}
-	if c.pending != nil || len(n.notices) != 0 {
-		t.Fatalf("pending = %v, notices = %v", c.pending, n.notices)
+	if c.pending != nil {
+		t.Fatalf("pending = %v, want nil", c.pending)
+	}
+	// Working pulses are the run-activity signal for the buffered start;
+	// no outcome notice belongs to this path.
+	for _, notice := range n.notices {
+		if notice.Kind != NoticeWorking {
+			t.Fatalf("unexpected notice %q on the buffered-start path", notice.Kind)
+		}
 	}
 }

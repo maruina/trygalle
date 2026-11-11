@@ -81,3 +81,24 @@ func TestTransportContractChunkedResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkingNoticeIsATypingPulseNeverAMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tt, s := newStubTransport(t, nil, nil, contractSendOK)
+
+	for range 5 {
+		tt.Notice(ctx, runtime.Notice{Kind: runtime.NoticeWorking})
+	}
+	waitFor(t, 2*time.Second, func() bool { return s.chatActionCount() >= 1 }, "the first typing pulse")
+	time.Sleep(50 * time.Millisecond)
+	if n := s.chatActionCount(); n < 1 {
+		t.Errorf("typing pulses = %d, want at least 1", n)
+	}
+	if got := len(s.delivered()); got != 0 {
+		t.Errorf("typing pulses delivered %d chat messages, want 0", got)
+	}
+	if got := s.chatActionID(); got != 42 {
+		t.Errorf("typing pulse chat = %d, want the allowed user's chat", got)
+	}
+}

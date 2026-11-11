@@ -236,15 +236,22 @@ func (n *recordingNotifier) Notice(ctx context.Context, notice runtime.Notice) {
 
 func (n *recordingNotifier) waitForResponse(t *testing.T) string {
 	t.Helper()
-	select {
-	case text := <-n.responses:
-		return text
-	case notice := <-n.notices:
-		t.Fatalf("unexpected notice %q instead of a response", notice.Kind)
-		return ""
-	case <-time.After(2 * time.Second):
-		t.Fatal("no response within 2s")
-		return ""
+	for {
+		select {
+		case text := <-n.responses:
+			return text
+		case notice := <-n.notices:
+			// Working is run activity, not a terminal outcome: the run can
+			// pulse it any number of times before settling.
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
+			t.Fatalf("unexpected notice %q instead of a response", notice.Kind)
+			return ""
+		case <-time.After(2 * time.Second):
+			t.Fatal("no response within 2s")
+			return ""
+		}
 	}
 }
 
@@ -253,6 +260,10 @@ func (n *recordingNotifier) waitForNotice(t *testing.T, kind runtime.NoticeKind)
 	for {
 		select {
 		case notice := <-n.notices:
+			// Working is run activity, not an outcome: skip its pulses.
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
 			if notice.Kind == kind {
 				return notice
 			}
@@ -280,6 +291,9 @@ func (n *recordingNotifier) waitForResponseAndNotice(t *testing.T) (string, runt
 		case text = <-n.responses:
 			haveText = true
 		case notice = <-n.notices:
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
 			haveNotice = true
 		case <-time.After(2 * time.Second):
 			t.Fatalf("missing outcome: response=%t notice=%t", haveText, haveNotice)
@@ -715,7 +729,9 @@ func TestProcessExitWhileRunningIsFatal(t *testing.T) {
 	case text := <-n.responses:
 		t.Errorf("unexpected response %q after process exit", text)
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q after process exit", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q after process exit", notice.Kind)
+		}
 	case <-time.After(100 * time.Millisecond):
 	}
 }

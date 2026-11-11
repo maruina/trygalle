@@ -102,7 +102,9 @@ func TestLiveStartupEmptySessionDir(t *testing.T) {
 	}
 	select {
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q on a healthy first boot", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q on a healthy first boot", notice.Kind)
+		}
 	default:
 	}
 }
@@ -124,7 +126,9 @@ func TestLiveResumeAfterCompletedPrompt(t *testing.T) {
 	}
 	select {
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q on a healthy resume", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q on a healthy resume", notice.Kind)
+		}
 	default:
 	}
 }
@@ -159,7 +163,9 @@ func TestLiveResumePartialTrailingLine(t *testing.T) {
 	}
 	select {
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q; the damaged session must not degrade the start", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q; the damaged session must not degrade the start", notice.Kind)
+		}
 	default:
 	}
 }
@@ -229,7 +235,7 @@ func TestLiveKillMidSessionIsFatal(t *testing.T) {
 		case text := <-n.responses:
 			t.Errorf("unexpected response %q after the kill", text)
 		case notice := <-n.notices:
-			if notice.Kind != runtime.NoticeRoutingFailure {
+			if notice.Kind != runtime.NoticeWorking && notice.Kind != runtime.NoticeRoutingFailure {
 				t.Errorf("unexpected notice %q after the kill", notice.Kind)
 			}
 		default:

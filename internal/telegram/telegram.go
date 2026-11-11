@@ -58,6 +58,7 @@ const (
 // send loop testable against a stub.
 type sender interface {
 	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
+	SendChatAction(ctx context.Context, params *bot.SendChatActionParams) (bool, error)
 }
 
 var (
@@ -72,6 +73,10 @@ type Transport struct {
 	cfg    Config
 	sender sender
 	log    *slog.Logger
+
+	// typing carries coalesced run-activity pulses for the typing
+	// indicator goroutine; capacity one because excess pulses drop.
+	typing chan struct{}
 
 	mu        sync.Mutex
 	queue     []*qmsg
@@ -143,11 +148,13 @@ func newTransport(cfg Config, send sender, log *slog.Logger, wait func(ctx conte
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		typing:   make(chan struct{}, 1),
 		rectx:    rectx,
 		recancel: recancel,
 		wait:     wait,
 	}
 	go t.run()
+	go t.runTyping()
 	return t
 }
 
@@ -161,9 +168,49 @@ func (t *Transport) Response(_ context.Context, text string) {
 // kinds supersede pending same-kind messages; the restart notice bypasses
 // holds for its single drain attempt.
 func (t *Transport) Notice(_ context.Context, n runtime.Notice) {
+	if n.Kind == runtime.NoticeWorking {
+		// The run-activity signal is a transient typing indicator, never a
+		// chat message: pulses coalesce and fire-and-forget so the
+		// coordinator event loop never waits on the wire.
+		t.pulseTyping()
+		return
+	}
 	once := n.Kind == runtime.NoticeRestartNotice
 	supersede := n.Kind == runtime.NoticeStatus || n.Kind == runtime.NoticeHeartbeat
 	t.enqueueBatch(string(n.Kind), renderNotice(n), once, supersede)
+}
+
+// pulseTyping coalesces at most one pending indicator; excess pulses drop
+// because the next activity milestone re-pulses anyway.
+func (t *Transport) pulseTyping() {
+	select {
+	case t.typing <- struct{}{}:
+	default:
+	}
+}
+
+// typingTimeout bounds one sendChatAction call.
+const typingTimeout = 10 * time.Second
+
+// runTyping drains the coalesced indicator pulses. It exits with Close; a
+// send racing the cancel fails with a metadata-only log.
+func (t *Transport) runTyping() {
+	for {
+		select {
+		case <-t.stop:
+			return
+		case <-t.typing:
+			ctx, cancel := context.WithTimeout(t.rectx, typingTimeout)
+			_, err := t.sender.SendChatAction(ctx, &bot.SendChatActionParams{
+				ChatID: t.cfg.AllowedUser,
+				Action: models.ChatActionTyping,
+			})
+			cancel()
+			if err != nil {
+				t.log.Warn("typing indicator send failed", "error", err)
+			}
+		}
+	}
 }
 
 // Close finishes delivery. Enqueue closes first (later calls are safe

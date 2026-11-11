@@ -257,15 +257,21 @@ func liveUserMessages(t *testing.T, client *rpc.Client) []string {
 // awaitLiveResponse consumes notices until a run response arrives.
 func awaitLiveResponse(t *testing.T, n *recordingNotifier) string {
 	t.Helper()
-	select {
-	case text := <-n.responses:
-		return text
-	case notice := <-n.notices:
-		t.Fatalf("unexpected notice %q instead of a run response", notice.Kind)
-		return ""
-	case <-time.After(compactionLiveTimeout):
-		t.Fatal("no run response within the live bound")
-		return ""
+	deadline := time.After(compactionLiveTimeout)
+	for {
+		select {
+		case text := <-n.responses:
+			return text
+		case notice := <-n.notices:
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
+			t.Fatalf("unexpected notice %q instead of a run response", notice.Kind)
+			return ""
+		case <-deadline:
+			t.Fatal("no run response within the live bound")
+			return ""
+		}
 	}
 }
 
@@ -276,6 +282,9 @@ func awaitLiveNotice(t *testing.T, n *recordingNotifier, kind runtime.NoticeKind
 	for {
 		select {
 		case notice := <-n.notices:
+			if notice.Kind == runtime.NoticeWorking {
+				continue
+			}
 			if notice.Kind == kind {
 				return notice
 			}

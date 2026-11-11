@@ -131,7 +131,9 @@ func TestUIDialogMethodsAnsweredCancelled(t *testing.T) {
 			case text := <-n.responses:
 				t.Errorf("dialog produced a response %q", text)
 			case notice := <-n.notices:
-				t.Errorf("dialog produced notice %q", notice.Kind)
+				if notice.Kind != runtime.NoticeWorking {
+					t.Errorf("dialog produced notice %q", notice.Kind)
+				}
 			default:
 			}
 		})
@@ -171,7 +173,9 @@ func TestUIFireAndForgetLoggedWithoutDelivery(t *testing.T) {
 			case text := <-n.responses:
 				t.Errorf("fire-and-forget method produced a response %q", text)
 			case notice := <-n.notices:
-				t.Errorf("fire-and-forget method produced notice %q", notice.Kind)
+				if notice.Kind != runtime.NoticeWorking {
+					t.Errorf("fire-and-forget method produced notice %q", notice.Kind)
+				}
 			default:
 			}
 		})

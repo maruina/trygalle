@@ -585,11 +585,14 @@ func (c *Coordinator) handleEvent(e Event) {
 	}
 	switch e.Type {
 	case eventAgentStart:
-		c.noteAgentStart()
+		if c.noteAgentStart() {
+			c.notifyWorking()
+		}
 		c.log.Info("agent started")
 	case eventAgentSettled:
 		c.noteSettled()
 	case eventTurnStart:
+		c.notifyWorking()
 		c.log.Info("turn started")
 	case eventTurnEnd:
 		c.noteMessage(e.Message)
@@ -598,11 +601,15 @@ func (c *Coordinator) handleEvent(e Event) {
 		// Per-message milestones stay unlogged: a run can carry dozens, and
 		// the turn boundaries already mark the agent's progress.
 		c.noteMessage(e.Message)
+		c.notifyWorking()
 	case eventCompactionStart:
+		c.notifyWorking()
 		c.log.Info("compaction started")
 	case eventCompactionEnd:
+		c.notifyWorking()
 		c.log.Info("compaction ended")
 	case eventAutoRetryStart:
+		c.notifyWorking()
 		c.log.Info("pi auto-retry started", "reason", e.Reason)
 	case eventAutoRetryEnd:
 		c.log.Info("pi auto-retry ended")
@@ -638,14 +645,29 @@ func (c *Coordinator) endSupersede(e Event) bool {
 	return true
 }
 
-func (c *Coordinator) noteAgentStart() {
+func (c *Coordinator) noteAgentStart() bool {
 	switch {
 	case c.op != nil:
 		c.op.hasRun = true
+		return true
 	case c.pending != nil:
 		c.pending.hasRun = true
+		return true
 	default:
 		c.log.Debug("agent_start outside any tracked operation")
+		return false
+	}
+}
+
+// notifyWorking refreshes the run-activity signal on the notifier seam:
+// metadata only, no payload, once per activity milestone while a tracked
+// operation runs. The Telegram transport renders it as a transient typing
+// indicator; the REPL ignores it because its interactive surface shows no
+// chat-level progress. Fire-and-forget by contract: the notifier must never
+// block the event loop.
+func (c *Coordinator) notifyWorking() {
+	if c.op != nil || c.pending != nil {
+		c.notifier.Notice(context.Background(), Notice{Kind: NoticeWorking})
 	}
 }
 
