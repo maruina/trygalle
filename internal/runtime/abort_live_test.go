@@ -206,14 +206,21 @@ func TestLiveCoordinatorAbortMidRun(t *testing.T) {
 	if err := c.HandleUserInput(context.Background(), "fresh prompt after abort"); err != nil {
 		t.Fatalf("HandleUserInput after /abort: %v", err)
 	}
-	select {
-	case text := <-n.responses:
-		if text != "answer after abort" {
-			t.Errorf("post-abort response = %q, want the scripted answer", text)
+	deadline := time.After(abortLiveTimeout)
+	for {
+		select {
+		case text := <-n.responses:
+			if text != "answer after abort" {
+				t.Errorf("post-abort response = %q, want the scripted answer", text)
+			}
+			return
+		case extra := <-n.notices:
+			if extra.Kind == runtime.NoticeWorking {
+				continue
+			}
+			t.Fatalf("unexpected notice %q instead of the post-abort response", extra.Kind)
+		case <-deadline:
+			t.Fatal("no post-abort response within 60s")
 		}
-	case extra := <-n.notices:
-		t.Fatalf("unexpected notice %q instead of the post-abort response", extra.Kind)
-	case <-time.After(abortLiveTimeout):
-		t.Fatal("no post-abort response within 60s")
 	}
 }

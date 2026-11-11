@@ -94,15 +94,22 @@ func TestLiveNewSessionMidRun(t *testing.T) {
 	if err := c.HandleUserInput(context.Background(), "fresh prompt after new"); err != nil {
 		t.Fatalf("HandleUserInput after /new: %v", err)
 	}
-	select {
-	case text := <-n.responses:
-		if text != "answer after new" {
-			t.Errorf("post-/new response = %q, want the scripted answer", text)
+	deadline := time.After(newLiveTimeout)
+	for {
+		select {
+		case text := <-n.responses:
+			if text != "answer after new" {
+				t.Errorf("post-/new response = %q, want the scripted answer", text)
+			}
+			return
+		case extra := <-n.notices:
+			if extra.Kind == runtime.NoticeWorking {
+				continue
+			}
+			t.Fatalf("unexpected notice %q instead of the post-/new response", extra.Kind)
+		case <-deadline:
+			t.Fatal("no post-/new response within 60s")
 		}
-	case extra := <-n.notices:
-		t.Fatalf("unexpected notice %q instead of the post-/new response", extra.Kind)
-	case <-time.After(newLiveTimeout):
-		t.Fatal("no post-/new response within 60s")
 	}
 }
 

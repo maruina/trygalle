@@ -267,6 +267,12 @@ func (n stdoutNotifier) Response(ctx context.Context, text string) {
 }
 
 func (n stdoutNotifier) Notice(ctx context.Context, notice runtime.Notice) {
+	// The run-activity signal renders as a transient Telegram typing
+	// indicator; the interactive REPL surface has no chat-level progress to
+	// animate, so it stays silent rather than printing per milestone.
+	if notice.Kind == runtime.NoticeWorking {
+		return
+	}
 	fmt.Fprintf(n.w, "[trygalle] %s\n", renderNotice(notice))
 }
 

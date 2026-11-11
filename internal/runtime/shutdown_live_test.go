@@ -82,7 +82,9 @@ func TestLiveShutdownMidRunAbortsInOrder(t *testing.T) {
 	case text := <-n.responses:
 		t.Errorf("aborted run delivered a response %q", text)
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q after the restart notice", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q after the restart notice", notice.Kind)
+		}
 	case <-time.After(200 * time.Millisecond):
 	}
 }

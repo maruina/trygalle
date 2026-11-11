@@ -372,7 +372,9 @@ func TestProtocolErrorWhileRunningIsFatal(t *testing.T) {
 	case text := <-n.responses:
 		t.Errorf("unexpected response %q after the protocol integrity failure", text)
 	case notice := <-n.notices:
-		t.Errorf("unexpected notice %q after the protocol integrity failure", notice.Kind)
+		if notice.Kind != runtime.NoticeWorking {
+			t.Errorf("unexpected notice %q after the protocol integrity failure", notice.Kind)
+		}
 	case <-time.After(100 * time.Millisecond):
 	}
 }

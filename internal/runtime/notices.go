@@ -13,7 +13,10 @@ type NoticeKind string
 
 // The notice kinds of the pinned notifier seam. ExtensionHandled extends the
 // original ten with the outcome of an extension command that consumed a
-// mid-run input (see the coordinator handled-mid-run branch).
+// mid-run input (see the coordinator handled-mid-run branch). Working
+// (2026-11-11 amendment) signals run activity so a transport can show a
+// transient progress indicator; it carries no payload and never renders as
+// a chat message.
 const (
 	NoticeStatus              NoticeKind = "Status"
 	NoticeSteerAcknowledged   NoticeKind = "SteerAcknowledged"
@@ -26,6 +29,7 @@ const (
 	NoticeHeartbeat           NoticeKind = "Heartbeat"
 	NoticeRoutingFailure      NoticeKind = "RoutingFailure"
 	NoticeRestartNotice       NoticeKind = "RestartNotice"
+	NoticeWorking             NoticeKind = "Working"
 )
 
 // Notice is one system notice: a category plus the small structured payload

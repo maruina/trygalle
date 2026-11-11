@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      // The pi pin lives in three files with two different shapes. One regex
+      // manager matches both, so a bump PR moves the Go constant, the CI
+      // install line, and the AGENTS.md install line together — and the full
+      // CI job then runs the live suite against the new pin, which is the
+      // upgrade evidence gate (AGENTS.md).
+      "managerFilePatterns": [
+        "/^internal/harness/harness\\.go$/",
+        "/^\\.github/workflows/ci\\.yml$/",
+        "/^AGENTS\\.md$/"
+      ],
+      "matchStrings": [
+        "PinnedPiVersion\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "@earendil-works/pi-coding-agent@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "@earendil-works/pi-coding-agent",
+      "datasourceTemplate": "npm"
+    }
+  ]
+}

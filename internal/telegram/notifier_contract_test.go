@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -79,5 +80,90 @@ func TestTransportContractChunkedResponse(t *testing.T) {
 		if units := utf16StringLen(c); units > maxMessageUTF16CodeUnits {
 			t.Errorf("chunk %d has %d units, over the limit", i, units)
 		}
+	}
+}
+
+func TestWorkingNoticeIsATypingPulseNeverAMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tt, s := newStubTransport(t, nil, nil, contractSendOK)
+
+	for range 5 {
+		tt.Notice(ctx, runtime.Notice{Kind: runtime.NoticeWorking})
+	}
+	waitFor(t, 2*time.Second, func() bool { return s.chatActionCount() >= 1 }, "the first typing pulse")
+	time.Sleep(50 * time.Millisecond)
+	if n := s.chatActionCount(); n < 1 {
+		t.Errorf("typing pulses = %d, want at least 1", n)
+	}
+	if got := len(s.delivered()); got != 0 {
+		t.Errorf("typing pulses delivered %d chat messages, want 0", got)
+	}
+	if got := s.chatActionID(); got != 42 {
+		t.Errorf("typing pulse chat = %d, want the allowed user's chat", got)
+	}
+}
+
+// fastTypingTimers shrinks one transport's typing cadence to a millisecond
+// scale; the per-transport fields keep parallel tests race-free.
+func fastTypingTimers(tt *Transport) {
+	tt.typingTimeout = 50 * time.Millisecond
+	tt.typingRefresh = 30 * time.Millisecond
+	tt.typingRefreshWindow = 120 * time.Millisecond
+}
+
+func TestTypingScopeRefreshesWhileActivityContinues(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tt, s := newStubTransport(t, nil, nil, contractSendOK)
+	fastTypingTimers(tt)
+
+	tt.Notice(ctx, runtime.Notice{Kind: runtime.NoticeWorking})
+	// One send on entry, then refreshes every cadence while the scope is
+	// live and no later milestone needs to re-pulse.
+	waitFor(t, 2*time.Second, func() bool { return s.chatActionCount() >= 3 }, "the refresh cadence to keep the indicator alive")
+	if got := len(s.delivered()); got != 0 {
+		t.Errorf("typing refreshes delivered %d chat messages, want 0", got)
+	}
+}
+
+func TestTypingScopeIdlesAfterSilence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tt, s := newStubTransport(t, nil, nil, contractSendOK)
+	fastTypingTimers(tt)
+
+	tt.Notice(ctx, runtime.Notice{Kind: runtime.NoticeWorking})
+	waitFor(t, 2*time.Second, func() bool { return s.chatActionCount() >= 1 }, "the first typing send")
+	// The window lapses with no further pulses: the scope idles and the
+	// count freezes instead of looping forever.
+	time.Sleep(3 * tt.typingRefreshWindow)
+	frozen := s.chatActionCount()
+	time.Sleep(50 * time.Millisecond)
+	if got := s.chatActionCount(); got != frozen {
+		t.Errorf("typing sends after the silent window = %d, frozen at %d", got, frozen)
+	}
+}
+
+func TestTypingSuppressesAfterConsecutiveFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tt, s := newStubTransport(t, nil, nil, contractSendOK)
+	fastTypingTimers(tt)
+	s.chatActionErr = errors.New("chat action rejected")
+
+	tt.Notice(ctx, runtime.Notice{Kind: runtime.NoticeWorking})
+	time.Sleep(3 * tt.typingRefreshWindow)
+	first := s.chatActionCount()
+	if first == 0 {
+		t.Fatal("no chat-action attempts observed")
+	}
+	if first > tt.typingSuppressAfter {
+		t.Errorf("chat-action attempts in one failing scope = %d, want suppression after %d", first, tt.typingSuppressAfter)
+	}
+	frozen := s.chatActionCount()
+	time.Sleep(50 * time.Millisecond)
+	if got := s.chatActionCount(); got != frozen {
+		t.Errorf("attempts after suppression = %d, frozen at %d", got, frozen)
 	}
 }

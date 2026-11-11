@@ -46,6 +46,13 @@ func (h *logCapture) WithGroup(string) slog.Handler { return h }
 
 func (h *logCapture) logger() *slog.Logger { return slog.New(h) }
 
+// snapshot returns every recorded record in order.
+func (h *logCapture) snapshot() []logRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.records)
+}
+
 // waitFor waits for the first record with msg and consumes it.
 func (h *logCapture) waitFor(t *testing.T, msg string) logRecord {
 	t.Helper()
@@ -124,7 +131,9 @@ func TestUIDialogMethodsAnsweredCancelled(t *testing.T) {
 			case text := <-n.responses:
 				t.Errorf("dialog produced a response %q", text)
 			case notice := <-n.notices:
-				t.Errorf("dialog produced notice %q", notice.Kind)
+				if notice.Kind != runtime.NoticeWorking {
+					t.Errorf("dialog produced notice %q", notice.Kind)
+				}
 			default:
 			}
 		})
@@ -164,7 +173,9 @@ func TestUIFireAndForgetLoggedWithoutDelivery(t *testing.T) {
 			case text := <-n.responses:
 				t.Errorf("fire-and-forget method produced a response %q", text)
 			case notice := <-n.notices:
-				t.Errorf("fire-and-forget method produced notice %q", notice.Kind)
+				if notice.Kind != runtime.NoticeWorking {
+					t.Errorf("fire-and-forget method produced notice %q", notice.Kind)
+				}
 			default:
 			}
 		})

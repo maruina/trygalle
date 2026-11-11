@@ -39,14 +39,21 @@ func TestLiveStatusDuringRun(t *testing.T) {
 	}
 
 	// The active run still settles into its own response afterwards.
-	select {
-	case text := <-n.responses:
-		if text == "" {
-			t.Error("settlement response is empty")
+	deadline := time.After(60 * time.Second)
+	for {
+		select {
+		case text := <-n.responses:
+			if text == "" {
+				t.Error("settlement response is empty")
+			}
+			return
+		case extra := <-n.notices:
+			if extra.Kind == runtime.NoticeWorking {
+				continue
+			}
+			t.Fatalf("unexpected notice %q instead of the run response", extra.Kind)
+		case <-deadline:
+			t.Fatal("no settlement response within 60s")
 		}
-	case extra := <-n.notices:
-		t.Fatalf("unexpected notice %q instead of the run response", extra.Kind)
-	case <-time.After(60 * time.Second):
-		t.Fatal("no settlement response within 60s")
 	}
 }
