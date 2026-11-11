@@ -78,6 +78,13 @@ type Transport struct {
 	// indicator goroutine; capacity one because excess pulses drop.
 	typing chan struct{}
 
+	// typing timing per transport, copied from the defaults at construction;
+	// tests shrink the cadence on their own instance.
+	typingTimeout       time.Duration
+	typingRefresh       time.Duration
+	typingRefreshWindow time.Duration
+	typingSuppressAfter int
+
 	mu        sync.Mutex
 	queue     []*qmsg
 	current   *qmsg // the in-flight head, still supersedeable when undelivered
@@ -142,16 +149,21 @@ func newTransport(cfg Config, send sender, log *slog.Logger, wait func(ctx conte
 	}
 	rectx, recancel := context.WithCancel(context.Background())
 	t := &Transport{
-		cfg:      cfg,
-		sender:   send,
-		log:      log,
-		wake:     make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		typing:   make(chan struct{}, 1),
-		rectx:    rectx,
-		recancel: recancel,
-		wait:     wait,
+		cfg:    cfg,
+		sender: send,
+		log:    log,
+		wake:   make(chan struct{}, 1),
+
+		typingTimeout:       defaultTypingTimeout,
+		typingRefresh:       defaultTypingRefresh,
+		typingRefreshWindow: defaultTypingRefreshWindow,
+		typingSuppressAfter: defaultTypingSuppressAfter,
+		stop:                make(chan struct{}),
+		done:                make(chan struct{}),
+		typing:              make(chan struct{}, 1),
+		rectx:               rectx,
+		recancel:            recancel,
+		wait:                wait,
 	}
 	go t.run()
 	go t.runTyping()
@@ -189,28 +201,99 @@ func (t *Transport) pulseTyping() {
 	}
 }
 
-// typingTimeout bounds one sendChatAction call.
-const typingTimeout = 10 * time.Second
+// Typing indicator timing defaults, shaped on ZeroClaw's channel scope and
+// OpenClaw's failure hardening (evidence in the telegram plan): Telegram
+// expires the indicator after 5s, so an open scope re-sends every 4s; a
+// scope with no activity for the window idles back to the pulse channel;
+// after the failure threshold the scope stops sending, because OpenClaw's
+// changelog pins repeated 401 sendChatAction loops as a Telegram
+// abuse-enforcement risk. deliberate: defaults are package vars copied into
+// per-transport fields, so tests shrink the cadence without racing parallel
+// tests.
+var (
+	defaultTypingTimeout       = 10 * time.Second
+	defaultTypingRefresh       = 4 * time.Second
+	defaultTypingRefreshWindow = 12 * time.Second
+	defaultTypingSuppressAfter = 3
+)
 
-// runTyping drains the coalesced indicator pulses. It exits with Close; a
-// send racing the cancel fails with a metadata-only log.
+// runTyping drains the coalesced indicator pulses. Each pulse opens one
+// activity scope; Close ends everything. A send racing the cancel fails with
+// a metadata-only log.
 func (t *Transport) runTyping() {
 	for {
 		select {
 		case <-t.stop:
 			return
 		case <-t.typing:
-			ctx, cancel := context.WithTimeout(t.rectx, typingTimeout)
-			_, err := t.sender.SendChatAction(ctx, &bot.SendChatActionParams{
-				ChatID: t.cfg.AllowedUser,
-				Action: models.ChatActionTyping,
-			})
-			cancel()
-			if err != nil {
-				t.log.Warn("typing indicator send failed", "error", err)
+			if t.runTypingScope() {
+				return
 			}
 		}
 	}
+}
+
+// runTypingScope holds the indicator alive for one activity scope: one send
+// on entry, re-sends every typingRefresh while the scope is live, and an
+// idle exit once the window lapses with no fresh pulse. It reports whether
+// the transport is closing.
+func (t *Transport) runTypingScope() (closing bool) {
+	failures := 0
+	send := func() {
+		if failures >= t.typingSuppressAfter {
+			return
+		}
+		ctx, cancel := context.WithTimeout(t.rectx, t.typingTimeout)
+		_, err := t.sender.SendChatAction(ctx, &bot.SendChatActionParams{
+			ChatID: t.cfg.AllowedUser,
+			Action: models.ChatActionTyping,
+		})
+		cancel()
+		if err != nil {
+			failures++
+			if failures == t.typingSuppressAfter {
+				t.log.Warn("typing indicator suppressed after consecutive failures", "error", err)
+			} else {
+				t.log.Warn("typing indicator send failed", "error", err)
+			}
+			return
+		}
+		failures = 0
+	}
+	send()
+	refresh := time.NewTimer(t.typingRefresh)
+	defer refresh.Stop()
+	window := time.NewTimer(t.typingRefreshWindow)
+	defer window.Stop()
+	for {
+		select {
+		case <-t.stop:
+			return true
+		case <-t.typing:
+			// A fresh pulse extends the window and restarts the cadence.
+			failures = 0
+			resetTimer(window, t.typingRefreshWindow)
+			resetTimer(refresh, t.typingRefresh)
+			send()
+		case <-refresh.C:
+			send()
+			resetTimer(refresh, t.typingRefresh)
+		case <-window.C:
+			return false
+		}
+	}
+}
+
+// resetTimer stops tm, drains a fired value if one landed, and restarts the
+// cadence; safe on Go 1.23+ synchronous timer channels.
+func resetTimer(tm *time.Timer, d time.Duration) {
+	if !tm.Stop() {
+		select {
+		case <-tm.C:
+		default:
+		}
+	}
+	tm.Reset(d)
 }
 
 // Close finishes delivery. Enqueue closes first (later calls are safe

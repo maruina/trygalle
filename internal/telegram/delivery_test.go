@@ -47,16 +47,21 @@ type stubSender struct {
 	chatIDs []int64
 	// chatActionIDs records the chat of each sendChatAction call.
 	chatActionIDs []int64
+	chatActionErr error
 	fn            func(ctx context.Context, call int, p *bot.SendMessageParams) (*botmodels.Message, error)
 }
 
 // SendChatAction records the chat and reports success, so tests count the
-// typing indicator pulses the transport makes.
+// typing indicator pulses the transport makes; chatActionErr scripts a
+// failing wire.
 func (s *stubSender) SendChatAction(_ context.Context, p *bot.SendChatActionParams) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id, ok := p.ChatID.(int64); ok {
 		s.chatActionIDs = append(s.chatActionIDs, id)
+	}
+	if s.chatActionErr != nil {
+		return false, s.chatActionErr
 	}
 	return true, nil
 }
