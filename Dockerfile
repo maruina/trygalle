@@ -1,6 +1,9 @@
 # Stage 1: build the static Trygalle binary. Cross-compiling on the build
 # platform keeps the arm64 build off QEMU; CGO is not in the build path.
 FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+# deliberate: auto lets the build download the go.mod toolchain directive when
+# a Renovate bump lands before the floating image tag rebuilds with it.
+ENV GOTOOLCHAIN=auto
 ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
