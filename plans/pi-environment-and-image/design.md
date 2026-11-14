@@ -1,6 +1,6 @@
 # Pi environment and image design
 
-Status: Draft (pending design comprehension review)
+Status: Approved
 
 Date: 2026-11-13
 
@@ -33,7 +33,7 @@ Both changes keep the parent's principles: the repository stays public and free 
 
 ## Goals
 
-- One multi-stage Docker image that builds the Trygalle binary and runs it with Pi 1.5.2, Node.js, `bash`, `git`, `curl`, `jq`, `ripgrep`, `ca-certificates`, and `kubectl`, with every tool and dependency version pinned.
+- One multi-stage Docker image, published for `linux/amd64` and `linux/arm64`, that builds the Trygalle binary and runs it with Pi 1.5.2, Node.js, `bash`, `git`, `curl`, `jq`, `ripgrep`, `ca-certificates`, and `kubectl`. Pi, Node.js, and `kubectl` are pinned to exact versions; the apt-installed tools follow the Debian bookworm security channel.
 - A container that starts with exactly three user inputs: `TRYGALLE_TELEGRAM_TOKEN`, `TRYGALLE_TELEGRAM_ALLOWED_USER`, and one provider API-key environment variable such as `ANTHROPIC_API_KEY`.
 - A Helm chart with a one-replica StatefulSet, a PersistentVolumeClaim for Pi sessions, Secret-backed credential injection, no built-in RBAC objects, and four value-driven renderers the user can fill with custom `Role`, `RoleBinding`, `ClusterRole`, and `ClusterRoleBinding` manifests.
 - Image publishing to `ghcr.io/maruina/trygalle` from GitHub Actions, with tags derived from Git refs.
@@ -95,6 +95,7 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/trygalle ./cmd/trygalle
 FROM node:24-bookworm-slim
 ARG PI_VERSION=1.5.2
 ARG KUBECTL_VERSION=1.34.2
+ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        bash git curl jq ripgrep ca-certificates \
@@ -104,8 +105,8 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION
 # kubectl is not in the Debian archive; install the pinned release binary and
 # verify it against its published SHA256 checksum.
 RUN curl -fsSL -o /usr/local/bin/kubectl \
-      https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
-    && echo "$(curl -fsSL https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256)  /usr/local/bin/kubectl" \
+      https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl \
+    && echo "$(curl -fsSL https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256)  /usr/local/bin/kubectl" \
        | sha256sum --check \
     && chmod 0755 /usr/local/bin/kubectl
 COPY --from=build /out/trygalle /usr/local/bin/trygalle
@@ -125,8 +126,10 @@ Decisions:
 - **Base images:** `golang:1.27-bookworm` for the builder and `node:24-bookworm-slim` for the runtime, both referenced by tag with Renovate-managed digests. A distroless or Chainguard runtime was considered and rejected: Pi needs Node plus `bash`, `git`, and `jq` for the approved `kubectl` workflows, so the slimming gain is small while the image assembly cost is real.
 - **Pi installation:** global npm install with `--ignore-scripts`, pinned to the exact version `harness.PinnedPiVersion` declares. The Renovate custom manager gains the Dockerfile in its `managerFilePatterns` so one bump PR moves every pin surface.
 - **Tool versions:** apt-managed tools take the Debian security channel; `kubectl` is pinned explicitly with a checksum verification because it is not available from the archive and changes the pod's Kubernetes blast radius. `KUBECTL_VERSION` is pinned per image build and bumped deliberately.
+- **Platforms:** the release publishes `linux/amd64` and `linux/arm64`. The Dockerfile selects the `kubectl` binary with the build platform's `TARGETARCH`, because the release path uses the same names as `GOARCH`.
 - **Runtime user:** the image's `node` user (UID 1000). Pi and its extensions run with these operating-system permissions; this is the only sandbox the beta claims, matching the parent security model. The chart sets `podSecurityContext.fsGroup: 1000` so PVC-mounted paths are group-writable.
 - **Working directory:** `/data/pi/work`. Because `--continue` selects sessions by current working directory, the path is fixed and PVC-backed through a `subPath` mount, so the resume set and any files Pi's tools create there survive pod restarts.
+- **Agent directory:** the default agent directory is `/home/node/.pi/agent`. It lives in the container filesystem rather than on the PVC, so a pod restart starts from an empty agent directory. Users who add extensions, skills, themes, or `models.json` persist them with the customization guide's volume plus `PI_CODING_AGENT_DIR`.
 - **Multi-stage build:** the Go compiler and the build layer are absent from the runtime image, matching the parent design.
 
 ### Entrypoint
@@ -138,10 +141,10 @@ Decisions:
 # The future dotfiles sidecar maps the harness checkout into the agent
 # directory here, before Trygalle starts Pi. deliberate: hook only; the
 # sidecar design owns the mapping and this script stays minimal until then.
-exec trygalle --pi-bin pi --session-dir "${TRYGALE_SESSION_DIR:-/data/pi/sessions}" "$@"
+exec trygalle --pi-bin pi --session-dir "${TRYGALLE_SESSION_DIR:-/data/pi/sessions}" "$@"
 ```
 
-The environment variable `TRYGALE_SESSION_DIR` overrides the session directory without an application change; the binary keeps requiring `--session-dir`, which the script always supplies. All other Trygalle flags flow through `CMD` and chart values.
+The environment variable `TRYGALLE_SESSION_DIR` overrides the session directory without an application change; the binary keeps requiring `--session-dir`, which the script always supplies. The chart sets `TRYGALLE_SESSION_DIR` from `trygalle.sessionDir`, so users change the session path with that one value. All other Trygalle flags flow through `CMD` and `trygalle.args`.
 
 ### Helm chart
 
@@ -157,7 +160,8 @@ Templates:
 | `statefulset.yaml` | One replica; PVC-backed `/data/pi/sessions` and `/data/pi/work` through subPath mounts |
 | `pvc.yaml` | Claim when `persistence.enabled` and no `persistence.existingClaim` |
 | `rbac-*.yaml` | Four renderers over user-provided lists |
-| `values.schema.json` | Requires the Telegram inputs when `secret.create` is true; validates value shapes |
+
+`values.schema.json` at the chart root requires `telegram.token` and `telegram.allowedUser` when `secret.create` is true, requires `secret.existingSecret` when it is false, and validates value shapes.
 
 Key values:
 
@@ -168,13 +172,23 @@ image:
   pullPolicy: IfNotPresent
 
 telegram:
-  token: ""          # required unless secret.existingSecret is set
+  token: ""          # required when secret.create is true
   allowedUser: 0     # required numeric user id
-  existingSecret: "" # use a pre-created Secret instead of secret.create
 
-# Arbitrary environment passed through to the container, e.g.
-# ANTHROPIC_API_KEY: sk-ant-...
+secret:
+  create: true       # create a chart-managed Secret from telegram.* and providerEnv
+  existingSecret: "" # use a pre-created Secret instead of secret.create
+  keys:              # key names read from existingSecret
+    telegramToken: telegram-token
+    telegramAllowedUser: telegram-allowed-user
+
+# Provider API keys, e.g. ANTHROPIC_API_KEY: sk-ant-...
+# Each entry becomes a Secret key and a container environment variable with
+# the same name.
 providerEnv: {}
+
+# Non-secret environment, rendered as literal container env.
+extraEnv: {}
 
 trygalle:
   sessionDir: /data/pi/sessions
@@ -183,6 +197,7 @@ trygalle:
 rbac:
   serviceAccount:
     create: true
+    name: ""         # defaults to the chart fullname
   # Each list renders user-provided objects verbatim. The chart fills in
   # defaults for name and namespace only when the user leaves them empty.
   roles: []
@@ -213,7 +228,7 @@ RBAC decisions:
 
 The chart creates no Service, Ingress, probes, or resource-collection annotations: Telegram long polling needs no inbound networking, and probes belong to follow-up #4.
 
-Secret handling: when `secret.create` is true, one chart-managed Secret holds `telegram.token`, `telegram.allowedUser`, and every `providerEnv` entry as stringData; the StatefulSet wires them as the exact environment names Trygalle and Pi read. When `secret.existingSecret` is set, the chart injects `valueFrom.secretKeyRef` entries for the documented key names and creates nothing.
+Secret handling: the Telegram token, the allowed user ID, and every provider API key come from one Secret. When `secret.create` is true the chart creates that Secret and fills it from `telegram.token`, `telegram.allowedUser`, and every `providerEnv` entry as stringData; the StatefulSet wires them through `valueFrom.secretKeyRef` as the exact environment names Trygalle and Pi read, and each `providerEnv` key serves as both the Secret key and the environment name. When `secret.existingSecret` is set, the chart creates nothing and reads `secret.keys.telegramToken`, `secret.keys.telegramAllowedUser`, and one key per `providerEnv` entry from that Secret, so a key named `ANTHROPIC_API_KEY` must exist there. Non-secret environment uses `extraEnv`, which renders as literal container env in both modes.
 
 ### Publishing
 
@@ -222,6 +237,7 @@ Secret handling: when `secret.create` is true, one chart-managed Secret holds `t
 - On push to `main`: build the image and push `ghcr.io/maruina/trygalle:sha-<git-sha>`.
 - On tag push `v*`: build and push the `v*` tag, the bare version, and `latest`.
 - The workflow runs with `permissions: packages: write` and authenticates to GHCR with the workflow's GITHUB_TOKEN.
+- Every push builds `linux/amd64` and `linux/arm64` and pushes one multi-platform manifest, so both architectures resolve the same tag.
 
 Chart consumption starts as clone-and-install (`helm install trygalle ./deploy/trygalle`); OCI chart publishing is deferred (Open questions). The workflow also runs the image smoke checks described under Testing strategy so a tag cannot publish an image whose Pi pin drifted.
 
@@ -255,6 +271,7 @@ Deliberately deferred with triggers: OCI chart publishing (needs evidence that u
 
 - A user following the README quickstart reaches a responding bot with three inputs and no repository build.
 - The image contains Pi 1.5.2 and reports it through `pi --version`; one Renovate PR updates every Pi pin surface.
+- The published manifest lists `linux/amd64` and `linux/arm64` for every tag.
 - `helm lint` and `helm template` pass with default and RBAC-populated test values; the rendered StatefulSet mounts both subPaths and references the ServiceAccount.
 - The container starts as UID 1000, writes sessions under the mounted volume, and fails loudly on a bad Telegram token rather than hanging.
 - The customization guide's mount path produces an agent directory Pi actually loads, verified manually against a test extension.
@@ -312,7 +329,8 @@ Deliberately deferred with triggers: OCI chart publishing (needs evidence that u
 - **Image smoke (CI, every build):** run the built image with no inputs and assert a fast non-zero exit with the missing-token diagnostic; run `pi --version`, `trygalle --help`, and `kubectl version --client` inside the image and assert the pinned versions.
 - **Pin alignment (CI, every build):** the Renovate manager's coverage is checked by the existing full-suite pin gate plus a Dockerfile grep for the pinned Pi version.
 - **Chart (CI, every build):** `helm lint`; `helm template` against a default-values fixture and an RBAC-populated fixture; assert the rendered StatefulSet mounts both subPaths and references the ServiceAccount.
-- **Boot behavior (local or CI):** run the container with a syntactically valid but wrong Telegram token against the real API and assert the poll-conflict fatal exit path described in `AGENTS.md`'s composition contract.
+- **Credential rejection (local or CI):** run the container with a valid-format but revoked Telegram token against the real API and assert Trygalle logs the Telegram rejection and exits non-zero instead of retrying.
+- **Poll conflict (local or CI):** run two containers against the same Telegram token and assert the poll-conflict fatal exit path described in `AGENTS.md`'s composition contract.
 - **Manual acceptance:** the README quickstart on a real bot; the customization guide's agent-directory mount with one test extension; the chart on the Talos cluster with the restricted RBAC example.
 - **Unchanged suites:** `go test -race ./...` and the short job continue to gate code changes; this design adds no Go behavior.
 
