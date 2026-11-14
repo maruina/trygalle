@@ -364,6 +364,8 @@ No execution deviation from the pinned plan so far. The `helm template` schema-r
 - [x] Run `go test -race -short ./...`; expect green.
 - [x] Commit with `feat: chart secret, statefulset, rbac renderers, and ci chart job`.
 
+Resume note (2026-11-14, glm-5.3-flash): both Slice 2 tasks were already implemented and committed from an earlier execute round (commits `d614565`, `4ef4fc0`, `513c71f`), so this round only re-ran the verification evidence on the current tree: `ct lint --config ct.yaml --all` (three lints, zero failures), the exact `ci.yml` assertion script extracted and run locally (exit 0), and `go test -race -short ./...` (all packages ok, `go fix -diff` and `gofmt -l` clean). No code changes were made in this round.
+
 ### Slice 3: Publishing and documentation
 **Delivers:** every release-warranting merge to `main` produces a tag, release notes, and a two-platform image after the smoke gate, plus the chart-testing lint gate and the documentation that makes the image usable. User feedback: the release workflow goes green on the next push to `main` (workflow file in the PR), and the docs read correctly.
 
