@@ -47,25 +47,31 @@ esac
 # entrypoint supplies, for the default and an overridden session directory,
 # plus any extra args passed through as CMD.
 FAKEBIN=$(mktemp -d)
+# The container reads the fake binary as UID 1000, so the mounted directory
+# must be traversable by all users; mktemp creates it 0700 under the CI user.
+chmod 0755 "$FAKEBIN"
 cat >"$FAKEBIN/trygalle" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*"
 EOF
 chmod 0755 "$FAKEBIN/trygalle"
 
-OUT=$(docker run --rm -e PATH=/fakebin -v "$FAKEBIN:/fakebin:ro" "$IMAGE" 2>&1)
+OUT=$(docker run --rm -e PATH=/fakebin -v "$FAKEBIN:/fakebin:ro" "$IMAGE" 2>&1) \
+    || fail "entrypoint default args run failed ($?): $OUT"
 case $OUT in
 *'--pi-bin pi --session-dir /data/pi/sessions'*) ;;
 *) fail "entrypoint default args wrong: $OUT" ;;
 esac
 
-OUT=$(docker run --rm -e PATH=/fakebin -e TRYGALLE_SESSION_DIR=/tmp/other -v "$FAKEBIN:/fakebin:ro" "$IMAGE" 2>&1)
+OUT=$(docker run --rm -e PATH=/fakebin -e TRYGALLE_SESSION_DIR=/tmp/other -v "$FAKEBIN:/fakebin:ro" "$IMAGE" 2>&1) \
+    || fail "entrypoint override args run failed ($?): $OUT"
 case $OUT in
 *'--pi-bin pi --session-dir /tmp/other'*) ;;
 *) fail "entrypoint override args wrong: $OUT" ;;
 esac
 
-OUT=$(docker run --rm -e PATH=/fakebin -v "$FAKEBIN:/fakebin:ro" "$IMAGE" --extra-flag 2>&1)
+OUT=$(docker run --rm -e PATH=/fakebin -v "$FAKEBIN:/fakebin:ro" "$IMAGE" --extra-flag 2>&1) \
+    || fail "entrypoint extra-args run failed ($?): $OUT"
 case $OUT in
 '--pi-bin pi --session-dir /data/pi/sessions --extra-flag') ;;
 *) fail "entrypoint did not pass extra args through in order: $OUT" ;;
@@ -73,13 +79,15 @@ esac
 
 # Pinned toolchain: pi reports the pinned version, trygalle runs, kubectl
 # matches the ARG literal, and every required tool resolves.
-OUT=$(docker run --rm --entrypoint /usr/local/bin/pi "$IMAGE" --version 2>&1)
+OUT=$(docker run --rm --entrypoint /usr/local/bin/pi "$IMAGE" --version 2>&1) \
+    || fail "in-image pi --version run failed ($?): $OUT"
 [ "$OUT" = "$PIN_GO" ] || fail "in-image pi --version ($OUT) does not match the pinned version ($PIN_GO)"
 
 docker run --rm --entrypoint /usr/local/bin/trygalle "$IMAGE" --help >/dev/null 2>&1 \
     || fail 'trygalle --help did not exit 0'
 
-OUT=$(docker run --rm --entrypoint /usr/local/bin/kubectl "$IMAGE" version --client 2>&1)
+OUT=$(docker run --rm --entrypoint /usr/local/bin/kubectl "$IMAGE" version --client 2>&1) \
+    || fail "kubectl version run failed ($?): $OUT"
 case $OUT in
 *"$KUBECTL_VERSION"*) ;;
 *) fail "kubectl version --client does not report $KUBECTL_VERSION: $OUT" ;;
@@ -91,7 +99,8 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'test -r /etc/ssl/certs/ca-cert
     || fail 'CA certificates bundle is missing'
 
 # Non-root runtime: UID 1000 and writable /data/pi paths.
-OUT=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'id -u' 2>&1)
+OUT=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'id -u' 2>&1) \
+    || fail "id -u run failed ($?): $OUT"
 [ "$OUT" = '1000' ] || fail "container runs as UID $OUT, expected 1000"
 
 docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'touch /data/pi/sessions/.smoke-probe /data/pi/work/.smoke-probe' >/dev/null 2>&1 \

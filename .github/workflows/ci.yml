@@ -79,74 +79,74 @@ jobs:
             || fail "rbac fixture render"
 
           # Default fixture: complete install with passthroughs.
-          rg -q 'subPath: sessions' /tmp/render-default.yaml \
+          grep -qE 'subPath: sessions' /tmp/render-default.yaml \
             || fail "default: sessions subPath mount missing"
-          rg -q 'subPath: work' /tmp/render-default.yaml \
+          grep -qE 'subPath: work' /tmp/render-default.yaml \
             || fail "default: work subPath mount missing"
-          rg -q 'serviceAccountName: trygalle$' /tmp/render-default.yaml \
+          grep -qE 'serviceAccountName: trygalle$' /tmp/render-default.yaml \
             || fail "default: serviceAccountName missing"
-          rg -q 'value: "/data/pi/sessions"' /tmp/render-default.yaml \
+          grep -qE 'value: "/data/pi/sessions"' /tmp/render-default.yaml \
             || fail "default: TRYGALLE_SESSION_DIR value missing"
-          rg -q 'name: TRYGALLE_TELEGRAM_TOKEN' /tmp/render-default.yaml \
+          grep -qE 'name: TRYGALLE_TELEGRAM_TOKEN' /tmp/render-default.yaml \
             || fail "default: telegram token env missing"
-          rg -q 'name: TRYGALLE_TELEGRAM_ALLOWED_USER' /tmp/render-default.yaml \
+          grep -qE 'name: TRYGALLE_TELEGRAM_ALLOWED_USER' /tmp/render-default.yaml \
             || fail "default: telegram allowed-user env missing"
-          rg -q 'name: DUMMY_PROVIDER_KEY' /tmp/render-default.yaml \
+          grep -qE 'name: DUMMY_PROVIDER_KEY' /tmp/render-default.yaml \
             || fail "default: provider env missing"
-          rg -q 'telegram-token: "123456:AaDUMMYTOKEN"' /tmp/render-default.yaml \
+          grep -qE 'telegram-token: "123456:AaDUMMYTOKEN"' /tmp/render-default.yaml \
             || fail "default: Secret token key missing"
-          rg -q 'telegram-allowed-user: "42"' /tmp/render-default.yaml \
+          grep -qE 'telegram-allowed-user: "42"' /tmp/render-default.yaml \
             || fail "default: Secret allowed-user key missing"
-          rg -q 'kind: PersistentVolumeClaim' /tmp/render-default.yaml \
+          grep -qE 'kind: PersistentVolumeClaim' /tmp/render-default.yaml \
             || fail "default: PVC missing"
-          rg -q 'storage: 5Gi' /tmp/render-default.yaml \
+          grep -qE 'storage: 5Gi' /tmp/render-default.yaml \
             || fail "default: PVC size missing"
-          rg -q 'name: dummy-extra-volume' /tmp/render-default.yaml \
+          grep -qE 'name: dummy-extra-volume' /tmp/render-default.yaml \
             || fail "default: extraVolumes passthrough missing"
-          rg -q 'name: dummy-sidecar' /tmp/render-default.yaml \
+          grep -qE 'name: dummy-sidecar' /tmp/render-default.yaml \
             || fail "default: extraContainers passthrough missing"
-          rg -q '^kind: (Role|RoleBinding|ClusterRole|ClusterRoleBinding)$' /tmp/render-default.yaml \
+          grep -qE '^kind: (Role|RoleBinding|ClusterRole|ClusterRoleBinding)$' /tmp/render-default.yaml \
             && fail "default: RBAC rendered with empty lists"
 
           # Existing-secret fixture: no chart Secret, user Secret referenced.
-          rg -q 'kind: Secret' /tmp/render-existing.yaml \
+          grep -qE 'kind: Secret' /tmp/render-existing.yaml \
             && fail "existing: chart Secret rendered"
-          rg -q 'name: trygalle-creds' /tmp/render-existing.yaml \
+          grep -qE 'name: trygalle-creds' /tmp/render-existing.yaml \
             || fail "existing: existingSecret name missing"
-          rg -q 'key: token-key' /tmp/render-existing.yaml \
+          grep -qE 'key: token-key' /tmp/render-existing.yaml \
             || fail "existing: telegram token key missing"
-          rg -q 'key: allowed-user-key' /tmp/render-existing.yaml \
+          grep -qE 'key: allowed-user-key' /tmp/render-existing.yaml \
             || fail "existing: telegram allowed-user key missing"
-          rg -q 'name: EXISTING_PROVIDER_KEY' /tmp/render-existing.yaml \
+          grep -qE 'name: EXISTING_PROVIDER_KEY' /tmp/render-existing.yaml \
             || fail "existing: provider env name missing"
-          rg -q 'key: EXISTING_PROVIDER_KEY' /tmp/render-existing.yaml \
+          grep -qE 'key: EXISTING_PROVIDER_KEY' /tmp/render-existing.yaml \
             || fail "existing: provider key not read under its environment name"
 
           # RBAC fixture: four kinds, defaulted names, rules carried through,
           # no namespace on the cluster-scoped kinds.
-          rg -q '^kind: Role$' /tmp/render-rbac.yaml || fail "rbac: Role missing"
-          rg -q '^kind: RoleBinding$' /tmp/render-rbac.yaml \
+          grep -qE '^kind: Role$' /tmp/render-rbac.yaml || fail "rbac: Role missing"
+          grep -qE '^kind: RoleBinding$' /tmp/render-rbac.yaml \
             || fail "rbac: RoleBinding missing"
-          rg -q '^kind: ClusterRole$' /tmp/render-rbac.yaml \
+          grep -qE '^kind: ClusterRole$' /tmp/render-rbac.yaml \
             || fail "rbac: ClusterRole missing"
-          rg -q '^kind: ClusterRoleBinding$' /tmp/render-rbac.yaml \
+          grep -qE '^kind: ClusterRoleBinding$' /tmp/render-rbac.yaml \
             || fail "rbac: ClusterRoleBinding missing"
-          rg -q 'name: trygalle-role$' /tmp/render-rbac.yaml \
+          grep -qE 'name: trygalle-role$' /tmp/render-rbac.yaml \
             || fail "rbac: Role default name missing"
-          rg -q 'name: trygalle-role-binding$' /tmp/render-rbac.yaml \
+          grep -qE 'name: trygalle-role-binding$' /tmp/render-rbac.yaml \
             || fail "rbac: RoleBinding default name missing"
-          rg -q 'name: trygalle-cluster-role$' /tmp/render-rbac.yaml \
+          grep -qE 'name: trygalle-cluster-role$' /tmp/render-rbac.yaml \
             || fail "rbac: ClusterRole default name missing"
-          rg -q 'name: trygalle-cluster-role-binding$' /tmp/render-rbac.yaml \
+          grep -qE 'name: trygalle-cluster-role-binding$' /tmp/render-rbac.yaml \
             || fail "rbac: ClusterRoleBinding default name missing"
-          rg -q -- '- pods' /tmp/render-rbac.yaml \
+          grep -qE -- '- pods' /tmp/render-rbac.yaml \
             || fail "rbac: Role rules not carried through"
-          rg -q -- '- nodes' /tmp/render-rbac.yaml \
+          grep -qE -- '- nodes' /tmp/render-rbac.yaml \
             || fail "rbac: ClusterRole rules not carried through"
-          if rg -A3 '^kind: ClusterRole$' /tmp/render-rbac.yaml | rg -q 'namespace:'; then \
+          if grep -A3 '^kind: ClusterRole$' /tmp/render-rbac.yaml | grep -qE 'namespace:'; then \
             fail "rbac: ClusterRole has metadata.namespace"; \
           fi
-          if rg -A3 '^kind: ClusterRoleBinding$' /tmp/render-rbac.yaml | rg -q 'namespace:'; then \
+          if grep -A3 '^kind: ClusterRoleBinding$' /tmp/render-rbac.yaml | grep -qE 'namespace:'; then \
             fail "rbac: ClusterRoleBinding has metadata.namespace"; \
           fi
 
@@ -156,21 +156,21 @@ jobs:
             -f deploy/trygalle/ci/ci-default-values.yaml \
             --set persistence.enabled=false > /tmp/render-no-pvc.yaml \
             || fail "persistence-off render"
-          rg -q 'kind: PersistentVolumeClaim' /tmp/render-no-pvc.yaml \
+          grep -qE 'kind: PersistentVolumeClaim' /tmp/render-no-pvc.yaml \
             && fail "persistence off: PVC rendered"
-          rg -q 'mountPath: /data/pi' /tmp/render-no-pvc.yaml \
+          grep -qE 'mountPath: /data/pi' /tmp/render-no-pvc.yaml \
             && fail "persistence off: /data/pi mount rendered"
-          rg -q 'persistentVolumeClaim:' /tmp/render-no-pvc.yaml \
+          grep -qE 'persistentVolumeClaim:' /tmp/render-no-pvc.yaml \
             && fail "persistence off: claim reference rendered"
-          rg -q 'name: dummy-extra-volume' /tmp/render-no-pvc.yaml \
+          grep -qE 'name: dummy-extra-volume' /tmp/render-no-pvc.yaml \
             || fail "persistence off: extraVolumes passthrough dropped"
           helm template trygalle deploy/trygalle \
             -f deploy/trygalle/ci/ci-default-values.yaml \
             --set persistence.existingClaim=my-claim > /tmp/render-existing-claim.yaml \
             || fail "existing-claim render"
-          rg -q 'claimName: my-claim' /tmp/render-existing-claim.yaml \
+          grep -qE 'claimName: my-claim' /tmp/render-existing-claim.yaml \
             || fail "existing claim: claimName missing"
-          rg -q 'kind: PersistentVolumeClaim' /tmp/render-existing-claim.yaml \
+          grep -qE 'kind: PersistentVolumeClaim' /tmp/render-existing-claim.yaml \
             && fail "existing claim: PVC rendered"
 
           # Schema: the strict values.schema.json rejects incomplete values.
@@ -181,7 +181,7 @@ jobs:
             >/dev/null 2>/tmp/schema-err.txt; then \
             fail "schema: empty token accepted"; \
           fi
-          rg -q "values don't meet the specifications of the schema" /tmp/schema-err.txt \
+          grep -qE "values don't meet the specifications of the schema" /tmp/schema-err.txt \
             || fail "schema: rejection without schema signature"
 
 concurrency:
