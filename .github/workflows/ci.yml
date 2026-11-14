@@ -21,7 +21,7 @@ jobs:
           - mode: full
             go-test-args: "-race"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -38,7 +38,7 @@ jobs:
   image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image
         run: docker build -t trygalle:smoke .
       - name: Run image smoke checks
@@ -47,7 +47,7 @@ jobs:
   chart:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # chart-testing inspects git history to find charts to lint.
           fetch-depth: 0
