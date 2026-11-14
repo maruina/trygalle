@@ -1,0 +1,39 @@
+# Chart-testing fixture: one minimal fragment per RBAC list. The Role has
+# no metadata, so the chart must default its name and namespace; the
+# ClusterRole and ClusterRoleBinding must render with no namespace.
+telegram:
+  token: "123456:AaDUMMYTOKEN"
+  allowedUser: 42
+
+providerEnv:
+  DUMMY_PROVIDER_KEY: dummy-provider-key-value
+
+rbac:
+  roles:
+    - rules:
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["get"]
+  roleBindings:
+    - roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: trygalle-role
+      subjects:
+        - kind: ServiceAccount
+          name: trygalle
+          namespace: default
+  clusterRoles:
+    - rules:
+        - apiGroups: [""]
+          resources: ["nodes"]
+          verbs: ["get"]
+  clusterRoleBindings:
+    - roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: trygalle-cluster-role
+      subjects:
+        - kind: ServiceAccount
+          name: trygalle
+          namespace: default

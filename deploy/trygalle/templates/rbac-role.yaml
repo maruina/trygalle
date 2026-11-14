@@ -1,0 +1,10 @@
+{{- /*
+  Render each user-provided Role verbatim. Defaults fill apiVersion, kind,
+  metadata.name, and metadata.namespace only; user-provided fields win, so
+  complete manifests render without duplicate keys.
+*/}}
+{{- range .Values.rbac.roles }}
+{{- $obj := mergeOverwrite (deepCopy (dict "apiVersion" "rbac.authorization.k8s.io/v1" "kind" "Role" "metadata" (dict "name" (printf "%s-role" (include "trygalle.fullname" $)) "namespace" $.Release.Namespace))) (deepCopy .) }}
+{{ toYaml $obj }}
+---
+{{- end }}

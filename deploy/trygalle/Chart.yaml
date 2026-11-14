@@ -1,0 +1,9 @@
+apiVersion: v2
+name: trygalle
+description: Run the trygalle Telegram bot against a Pi agent
+type: application
+maintainers:
+  - name: maruina
+    email: matteo.ruina@gmail.com
+version: 0.1.0
+appVersion: "0.1.0"

@@ -53,6 +53,31 @@ TRYGALLE_PI_TESTS=on go test -race ./...
 
 The supported version is `1.5.2`, declared as `harness.PinnedPiVersion`. The live suite is the upgrade evidence gate: changing the pin requires the complete live suite green against the new version, and the pin, the plan records, and `.github/workflows/ci.yml` must move in one change. Do not weaken the version check to make a test pass.
 
+Renovate manages that pin across four surfaces in one bump PR: `internal/harness/harness.go`, `.github/workflows/ci.yml`, `AGENTS.md`, and the npm install line in `Dockerfile`. `KUBECTL_VERSION` in the Dockerfile is deliberately not Renovate-managed.
+
+## Image and chart
+
+Build and smoke-check the image locally; the script asserts the missing-token exit, the pinned Pi/Trygalle/kubectl versions, the UID 1000 runtime, and the entrypoint args:
+
+```bash
+docker build -t trygalle:smoke . && scripts/image-smoke.sh trygalle:smoke
+```
+
+The chart needs chart-testing (`brew install chart-testing`). Lint every `deploy/trygalle/ci/*-values.yaml` fixture and render them for inspection:
+
+```bash
+ct lint --config ct.yaml --all
+helm template trygalle deploy/trygalle -f deploy/trygalle/ci/ci-default-values.yaml
+helm template trygalle deploy/trygalle -f deploy/trygalle/ci/ci-existing-secret-values.yaml
+helm template trygalle deploy/trygalle -f deploy/trygalle/ci/ci-rbac-values.yaml
+```
+
+The chart's bare default values fail the strict `values.schema.json` by design; always pass a fixture with `-f`. CI installs the current Helm and chart-testing releases (`azure/setup-helm`, `helm/chart-testing-action`), so a tool release that changes lint or schema behaviour is a plan amendment, not a silent drift.
+
+## Releases
+
+Every push to `main` runs semantic-release (`.github/workflows/release.yml`): `feat` publishes a minor version, `fix` and `chore` publish a patch, and every other type publishes nothing. A published release pushes `ghcr.io/maruina/trygalle:v<version>` and `:latest` as one `linux/amd64,linux/arm64` manifest after the smoke script passes; a push with no release-warranting commit publishes no image. Renovate must emit `chore(deps):` squash titles (`.github/renovate.json5` sets `semanticCommits: enabled`) so a dependency bump releases.
+
 ## Architecture constraints
 
 - Pi is the authority on session and run state. Do not add session-file parsing, command expansion, queueing, or completion detection as competing sources of behavior.

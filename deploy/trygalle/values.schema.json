@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "trygalle chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "telegram": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {"type": "string"},
+        "allowedUser": {"type": "integer"}
+      }
+    },
+    "secret": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"},
+        "existingSecret": {"type": "string"},
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "telegramToken": {"type": "string", "minLength": 1},
+            "telegramAllowedUser": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "providerEnv": {"type": "object", "additionalProperties": {"type": "string"}},
+    "extraEnv": {"type": "object", "additionalProperties": {"type": "string"}},
+    "trygalle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sessionDir": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {"type": "boolean"},
+            "name": {"type": "string"}
+          }
+        },
+        "roles": {"type": "array", "items": {"type": "object"}},
+        "roleBindings": {"type": "array", "items": {"type": "object"}},
+        "clusterRoles": {"type": "array", "items": {"type": "object"}},
+        "clusterRoleBindings": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string"},
+        "existingClaim": {"type": "string"}
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "fsGroup": {"type": "integer"}
+      }
+    },
+    "extraVolumes": {"type": "array", "items": {"type": "object"}},
+    "extraVolumeMounts": {"type": "array", "items": {"type": "object"}},
+    "extraContainers": {"type": "array", "items": {"type": "object"}},
+    "extraInitContainers": {"type": "array", "items": {"type": "object"}}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "secret": {"type": "object", "properties": {"create": {"const": true}}}
+        },
+        "required": ["secret"]
+      },
+      "then": {
+        "required": ["telegram"],
+        "properties": {
+          "telegram": {
+            "required": ["token", "allowedUser"],
+            "properties": {
+              "token": {"type": "string", "minLength": 1},
+              "allowedUser": {"type": "integer"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "secret": {"type": "object", "properties": {"create": {"const": false}}}
+        },
+        "required": ["secret"]
+      },
+      "then": {
+        "required": ["secret"],
+        "properties": {
+          "secret": {
+            "required": ["existingSecret"],
+            "properties": {
+              "existingSecret": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  ]
+}
