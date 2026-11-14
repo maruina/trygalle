@@ -15,6 +15,8 @@ extraVolumeMounts:
 
 The volume named `data` is the StatefulSet's PVC volume, rendered by the chart itself.
 
+Pi writes state into the agent directory at startup (`trust.json` and its lock file), so the mounted directory must be writable; a read-only mount stops Pi before it starts.
+
 Extensions that import npm packages need those packages installed inside the mounted directory: run `npm install` in that path on the host before the pod starts, or bake the install into a [derived image](#build-a-derived-image). Laptop-specific extensions may fail on Linux when they reference macOS paths or macOS commands; fix the paths or keep those extensions on the laptop only.
 
 ## Use a different model or provider endpoint
