@@ -24,6 +24,26 @@ Provider credentials enter through environment variables, so no `auth.json` is n
 
 To add a provider or point Pi at a compatible endpoint (Ollama, LM Studio, vLLM, proxies), add a `models.json` file to the agent directory from the previous section. Values in `models.json` can reference environment variables with `$NAME` interpolation, so an endpoint's `apiKey` can read the same `providerEnv` entry the container already receives.
 
+To pin the startup model without a full agent directory, mount a `settings.json` through the chart's passthroughs. A standalone ConfigMap keeps the file declarative and restart-safe:
+
+```yaml
+extraEnv:
+  PI_CODING_AGENT_DIR: /data/pi/agent
+extraVolumes:
+  - name: pi-settings
+    configMap:
+      name: trygalle-pi-settings
+extraVolumeMounts:
+  - name: data
+    mountPath: /data/pi/agent
+    subPath: agent
+  - name: pi-settings
+    mountPath: /data/pi/agent/settings.json
+    subPath: settings.json
+```
+
+with a ConfigMap whose `data.settings.json` carries the model keys, for example `{"defaultProvider": "opencode-go", "defaultModel": "glm-5.3-flash"}`. Pi resolves the provider key from the `providerEnv` entry, so the settings file holds no secret.
+
 ## Build a derived image
 If you prefer an immutable image over a mounted directory, build on top of the published one:
 
