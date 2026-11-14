@@ -1,0 +1,18 @@
+# Chart-testing fixture: dummy values only, never a real credential.
+# The schema rejects the chart's empty defaults, so every fixture carries
+# a token shape-valid dummy.
+telegram:
+  token: "123456:AaDUMMYTOKEN"
+  allowedUser: 42
+
+providerEnv:
+  DUMMY_PROVIDER_KEY: dummy-provider-key-value
+
+extraVolumes:
+  - name: dummy-extra-volume
+    emptyDir: {}
+
+extraContainers:
+  - name: dummy-sidecar
+    image: busybox
+    command: ["sleep", "infinity"]

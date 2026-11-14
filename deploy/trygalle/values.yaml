@@ -1,0 +1,52 @@
+image:
+  repository: ghcr.io/maruina/trygalle
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+telegram:
+  token: ""  # required when secret.create is true
+  allowedUser: 0  # required numeric user id
+
+secret:
+  create: true  # create a chart-managed Secret from telegram.* and providerEnv
+  existingSecret: ""  # use a pre-created Secret instead of secret.create
+  keys:  # key names read from existingSecret
+    telegramToken: telegram-token
+    telegramAllowedUser: telegram-allowed-user
+
+# Provider API keys, e.g. ANTHROPIC_API_KEY: sk-ant-...
+# Each entry becomes a Secret key and a container environment variable with
+# the same name.
+providerEnv: {}
+
+# Non-secret environment, rendered as literal container env.
+extraEnv: {}
+
+trygalle:
+  sessionDir: /data/pi/sessions
+  args: []  # extra flags, e.g. --no-continue, --heartbeat-interval
+
+rbac:
+  serviceAccount:
+    create: true
+    name: ""  # defaults to the chart fullname
+  # Each list renders user-provided objects verbatim. The chart fills in
+  # defaults for name and namespace only when the user leaves them empty.
+  roles: []
+  roleBindings: []
+  clusterRoles: []
+  clusterRoleBindings: []
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: ""
+  existingClaim: ""
+
+podSecurityContext:
+  fsGroup: 1000
+
+extraVolumes: []
+extraVolumeMounts: []
+extraContainers: []
+extraInitContainers: []
