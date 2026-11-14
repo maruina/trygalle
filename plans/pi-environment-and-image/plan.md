@@ -420,14 +420,30 @@ Manual acceptance needs a published image (Task 5) and the documentation (Task 6
 **Traces to:** the design's Testing strategy (manual acceptance items) and Rollout section
 **Files:** `plans/pi-environment-and-image/plan.md` (ledger only)
 
-- [ ] Merge the feature PR; expect the release workflow to create the tag and release notes that the dry run predicted, and to publish exactly two image tags: `v<version>` and `latest`. (After the 2026-11-14 baseline amendment, `v<version>` is `v0.1.0`.)
-- [ ] `docker manifest inspect ghcr.io/maruina/trygalle:v<version>`; expect both `linux/amd64` and `linux/arm64` listed.
-- [ ] Sync `Chart.yaml` `version` and `appVersion` to the released version in a `chore(release):` commit, so `image.tag: ""` resolves to an existing image; chart publication as an OCI artifact stays deferred.
-- [ ] Credential rejection: run the container with a valid-format but revoked Telegram token against the real API; expect the Telegram rejection logged and a non-zero exit instead of retrying.
-- [ ] Poll conflict: run two containers against the same token; expect the poll-conflict fatal exit on one of them.
-- [ ] Talos install: `helm install trygalle ./deploy/trygalle -f <real-values>` with the parent design's restricted `ClusterRole` supplied through the four RBAC lists; expect a running pod writing sessions to the PVC and no Kubernetes API activity beyond that.
-- [ ] Agent-directory mount: mount a test-extension directory and set `PI_CODING_AGENT_DIR`; expect Pi to load the extension.
-- [ ] Record the results under `### Slice 3 execution notes` and commit with `docs: record pi-environment-and-image manual acceptance`.
+- [x] Merge the feature PR; expect the release workflow to create the tag and release notes that the dry run predicted, and to publish exactly two image tags: `v<version>` and `latest`. (After the 2026-11-14 baseline amendment, `v<version>` is `v0.1.0`.)
+- [x] `docker manifest inspect ghcr.io/maruina/trygalle:v<version>`; expect both `linux/amd64` and `linux/arm64` listed.
+- [x] Sync `Chart.yaml` `version` and `appVersion` to the released version in a `chore(release):` commit, so `image.tag: ""` resolves to an existing image; chart publication as an OCI artifact stays deferred. (Verified as a no-op: `Chart.yaml` already carries `version: 0.1.0` and `appVersion: "0.1.0"`, matching release v0.1.0, so the empty `chore(release):` commit is deliberately omitted.)
+- [x] Credential rejection: run the container with a valid-format but revoked Telegram token against the real API; expect the Telegram rejection logged and a non-zero exit instead of retrying. (Executed with a valid-format dummy token rather than a formerly-real revoked one; the 401 path is the same code path — see the execution notes.)
+- [ ] Poll conflict: run two containers against the same token; expect the poll-conflict fatal exit on one of them. (Not executed: the 409 conflict needs a real bot token — a dummy token yields 401 on both containers, not 409. Stays open, operator.)
+- [ ] Talos install: `helm install trygalle ./deploy/trygalle -f <real-values>` with the parent design's restricted `ClusterRole` supplied through the four RBAC lists; expect a running pod writing sessions to the PVC and no Kubernetes API activity beyond that. (Not executed: needs real values with a real token and the Talos cluster. Stays open, operator.)
+- [x] Agent-directory mount: mount a test-extension directory and set `PI_CODING_AGENT_DIR`; expect Pi to load the extension.
+- [x] Record the results under `### Slice 3 execution notes` and commit with `docs: record pi-environment-and-image manual acceptance`.
+
+### Slice 3 execution notes
+
+Manual acceptance (2026-11-14, operator Matteo directing the agent):
+
+| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `skill-loader` | `prompt-required` | Route skills for the acceptance round | The work is GitHub/docker verification plus this ledger; no Go/Terraform/Kubernetes-API file triggers; `write` routed for the ledger prose |
+| `write` | `agent-selected` | The execution notes are a prose artifact | Complete sentences naming exact components and observed log lines; evidence-first claims |
+
+- **Merge and release.** PR #13 squash-merged as `edb4480` ("feat: pi container image, helm chart, and release automation (#13)"). The Release workflow run `43639866830` succeeded on that push: semantic-release logged "The next release version is 0.1.0" and "Published release 0.1.0". GitHub release `v0.1.0` carries generated notes with the `v0.0.1...v0.1.0` compare link and the Features entry. Tags: `v0.0.1` is the baseline anchor on the pre-merge `main` head with no published release and no image (per the user's initial-release decision); `v0.1.0` is the first published release.
+- **Manifest.** `docker manifest inspect ghcr.io/maruina/trygalle:v0.1.0` and `:latest` both list `linux/amd64` and `linux/arm64`, plus the two `unknown/unknown` attestation manifests buildx attaches. Verified after `docker login ghcr.io` because the package starts private.
+- **Credential rejection.** `docker run ghcr.io/maruina/trygalle:v0.1.0` with `TRYGALLE_TELEGRAM_TOKEN="123456:AaDUMMYTOKEN"` (valid format, not a real bot): Pi startup validated first, then the poll loop logged `level=WARN msg="poll configuration conflict" code=401`, `msg="poll loop stopped"`, `msg="poll loop" error="telegram: unrecoverable getUpdates HTTP 401: Unauthorized"`, and the process exited 1 — rejection logged, non-zero exit, no retry. No real token value reached any log.
+- **Agent-directory mount.** A test agent directory with `extensions/mount-probe.js` (writes `EXTENSION_LOADED_MARKER` to stderr on load) mounted at `/test-agent` with `PI_CODING_AGENT_DIR=/test-agent`: the marker printed first, and `pi startup validated sessionID=01a1dbdc-… commandsBySource=map[extension:2]` shows the extension registered its commands, not just that the file was read. The first attempt mounted the directory read-only and Pi exited on `EROFS` writing `trust.json.lock`; recorded as a writability requirement in `docs/customize.md` (commit on `main` alongside this record).
+- **Not executed (operator, open in Task 7).** Poll conflict needs a real bot token for the 409; Talos install needs real values and the cluster.
+- **Task 8 (Renovate).** Re-verified after the merge: no `Dependency Dashboard` issue (`--state all` empty), no `renovate/*` branch, no Renovate-authored PR. Installing the Renovate GitHub App stays operator work in the GitHub web UI; Task 7 and Task 9's Renovate-dependent checks stay open until then.
 
 ### Task 8: Confirm Renovate is enabled (operator: Matteo)
 **Delivers:** the single-bump-PR mechanism actually runs, instead of only being configured.
@@ -447,13 +463,13 @@ This task runs in parallel with Task 2.
 **Traces to:** the design's Requirements (all)
 **Files:** none (verification only)
 
-- [ ] `scripts/image-smoke.sh` green against a rebuild of the final `Dockerfile` (Requirements: credential failure, toolchain, non-root, session override; the script also proves the Dockerfile pin matches `harness.PinnedPiVersion`).
-- [ ] `ct lint --config ct.yaml` plus all fixture template assertions green (Requirements: default install, existing secret, RBAC, schema rejection, persistence including the existing claim).
-- [ ] The `ci.yml` `image` and `chart` jobs are green on the feature pull request, running the same commands as Tasks 1 and 4.
-- [ ] The semantic-release dry run from Task 5 reports the version the release run published (Requirements: automatic release).
-- [ ] Renovate pattern grep green and a Renovate-authored dependency pull request exists (Requirement: pin coverage, including the "renovate runs" scenario).
-- [ ] `go test -race -short ./...` green across the whole feature branch.
-- [ ] Feature-level criteria that only manual acceptance can prove (published manifest, real Telegram/provider behavior, Talos rollout, extension load) live in Task 7 and do not block code-slice delivery, per the design's validation limits.
+- [x] `scripts/image-smoke.sh` green against a rebuild of the final `Dockerfile` (Requirements: credential failure, toolchain, non-root, session override; the script also proves the Dockerfile pin matches `harness.PinnedPiVersion`). (Green in PR #13's `image` job after the runner fixes, in the release workflow's smoke gate on the release build, and locally.)
+- [x] `ct lint --config ct.yaml` plus all fixture template assertions green (Requirements: default install, existing secret, RBAC, schema rejection, persistence including the existing claim). (Green in PR #13's `chart` job after the `rg` → `grep` runner fix; the extracted assertion script exited 0 locally with 39 assertions.)
+- [x] The `ci.yml` `image` and `chart` jobs are green on the feature pull request, running the same commands as Tasks 1 and 4. (PR #13's final run: `chart`, `image`, `test (short)`, and `test (full)` all green.)
+- [x] The semantic-release dry run from Task 5 reports the version the release run published (Requirements: automatic release). (The post-baseline dry run predicted 0.1.0 and the release run published 0.1.0.)
+- [ ] Renovate pattern grep green and a Renovate-authored dependency pull request exists (Requirement: pin coverage, including the "renovate runs" scenario). (Pattern grep is green; the Renovate GitHub App is not installed, so no Renovate PR exists yet — blocked on the operator's app installation.)
+- [x] `go test -race -short ./...` green across the whole feature branch. (PR #13's full test job ran `-race` including the live suite against the pinned pi.)
+- [x] Feature-level criteria that only manual acceptance can prove (published manifest, real Telegram/provider behavior, Talos rollout, extension load) live in Task 7 and do not block code-slice delivery, per the design's validation limits. (Demonstrated: the release published while Task 7's poll-conflict and Talos items stayed open.)
 
 ---
 
