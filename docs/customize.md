@@ -24,7 +24,7 @@ Provider credentials enter through environment variables, so no `auth.json` is n
 
 To add a provider or point Pi at a compatible endpoint (Ollama, LM Studio, vLLM, proxies), add a `models.json` file to the agent directory from the previous section. Values in `models.json` can reference environment variables with `$NAME` interpolation, so an endpoint's `apiKey` can read the same `providerEnv` entry the container already receives.
 
-To pin the startup model without a full agent directory, mount a `settings.json` through the chart's passthroughs. A standalone ConfigMap keeps the file declarative and restart-safe:
+A `settings.json` is optional: with only a `providerEnv` key, Pi starts and resolves the credential, but its automatic model selection can land on a model the provider does not currently serve, and the first exchange fails with an upstream error. To pin the startup model without a full agent directory, mount a `settings.json` through the chart's passthroughs. A standalone ConfigMap keeps the file declarative and restart-safe:
 
 ```yaml
 extraEnv:
