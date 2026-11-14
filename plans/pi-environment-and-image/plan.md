@@ -298,7 +298,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 2: Renovate manager covers the Dockerfile
 **Delivers:** one bump PR will update all four Pi pin surfaces.
-**Blocked by:** Task 1 (the pinned line must exist in `Dockerfile`)
+**Blocked by:** Task 1
+The Renovate proof needs the pinned line to exist in `Dockerfile`.
 **Traces to:** Requirement "Single-PR Pi pin coverage"; design Pi installation decision
 **Files:** `.github/renovate.json5`
 
@@ -312,7 +313,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 3: Chart scaffold, defaults, schema, ServiceAccount, PVC
 **Delivers:** the chart lints green under `ct lint` with its `ci/` fixture and renders SA/PVC/defaults correctly.
-**Blocked by:** None (renders without the image)
+**Blocked by:** None
+The chart renders without the image.
 **Traces to:** Requirements "Default chart install renders complete", "Values schema validation", "Persistence toggle"
 **Files:** `deploy/trygalle/Chart.yaml`, `deploy/trygalle/values.yaml`, `deploy/trygalle/values.schema.json`, `deploy/trygalle/templates/_helpers.tpl`, `deploy/trygalle/templates/serviceaccount.yaml`, `deploy/trygalle/templates/pvc.yaml`, `deploy/trygalle/ci/ci-default-values.yaml`, `deploy/trygalle/.helmignore`, `ct.yaml`
 
@@ -345,7 +347,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 5: semantic-release workflow with smoke gate
 **Delivers:** every push to `main` runs semantic-release; a published release pushes `v<version>` and `latest` as one `linux/amd64,linux/arm64` manifest, and nothing is pushed when no release is warranted. `release.yml` parses and grants `contents: write` plus `packages: write`.
-**Blocked by:** Tasks 1 and 2 (builds the slice-1 Dockerfile; the smoke script reads its pin)
+**Blocked by:** Task 1 and Task 2
+The workflow builds the slice-1 Dockerfile; the smoke script reads its pin.
 **Traces to:** Requirements "Automatic release from conventional commits" and "Multi-platform publishing"; design Publishing section (with the approved deviation recorded in the brief)
 **Files:** `.github/workflows/release.yml`, `.releaserc.json`
 
@@ -358,7 +361,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 6: Documentation
 **Delivers:** a reader can run the bot from the image or the chart without touching the repository, and can customize it along the design's five paths.
-**Blocked by:** Tasks 1, 3, 4 (documents the image, entrypoint, and chart behavior)
+**Blocked by:** Task 1, Task 3, Task 4
+The documentation covers the image, entrypoint, and chart behavior.
 **Traces to:** Requirement "Run and customization documentation"; design Documentation section
 **Files:** `README.md`, `docs/customize.md`, `AGENTS.md`
 
@@ -370,7 +374,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 7: Manual acceptance (operator: Matteo)
 **Delivers:** the design's manual acceptance evidence, recorded in this file.
-**Blocked by:** Task 5 (needs a published image) and Task 6
+**Blocked by:** Task 5 and Task 6
+Manual acceptance needs a published image (Task 5) and the documentation (Task 6).
 **Traces to:** the design's Testing strategy (manual acceptance items) and Rollout section
 **Files:** `plans/pi-environment-and-image/plan.md` (ledger only)
 
@@ -385,7 +390,8 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 
 ### Task 8: Confirm Renovate is enabled (operator: Matteo)
 **Delivers:** the single-bump-PR mechanism actually runs, instead of only being configured.
-**Blocked by:** None (runs in parallel with Task 2)
+**Blocked by:** None
+This task runs in parallel with Task 2.
 **Traces to:** Requirement "Single-PR Pi pin coverage", scenario "renovate runs"; design Renovate decision
 **Files:** none (GitHub App installation; `.github/renovate.json5` unchanged)
 
