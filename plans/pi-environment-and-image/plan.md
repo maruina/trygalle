@@ -314,10 +314,12 @@ The Renovate proof needs the pinned line to exist in `Dockerfile`.
 **Traces to:** Requirement "Single-PR Pi pin coverage"; design Pi installation decision
 **Files:** `.github/renovate.json5`
 
-- [ ] Add `/^Dockerfile$/` to `managerFilePatterns` and `"semanticCommits": "enabled"`; change nothing else (the semantic commits setting is what gives semantic-release a conventional title to read).
-- [ ] Prove the match without running Renovate: `rg -n '"Dockerfile"' .github/renovate.json5` and `rg -o 'pi-coding-agent@[0-9]+\.[0-9]+\.[0-9]+' Dockerfile` (the existing npm matchString matches this line by construction); expect both to output the expected lines.
-- [ ] Run `go test -race -short ./...`; expect green (the pin gate's other surfaces are untouched).
-- [ ] Commit with `build: let renovate manage the dockerfile pi pin`.
+- [x] Add `/^Dockerfile$/` to `managerFilePatterns` and `"semanticCommits": "enabled"`; change nothing else (the semantic commits setting is what gives semantic-release a conventional title to read).
+- [x] Prove the match without running Renovate: `rg -n '"Dockerfile"' .github/renovate.json5` and `rg -o 'pi-coding-agent@[0-9]+\.[0-9]+\.[0-9]+' Dockerfile` (the existing npm matchString matches this line by construction); expect both to output the expected lines.
+- [x] Run `go test -race -short ./...`; expect green (the pin gate's other surfaces are untouched).
+- [x] Commit with `build: let renovate manage the dockerfile pi pin`.
+
+Task 2 probe note: the planned first probe `rg -n '"Dockerfile"'` matches nothing because the entry is `"/^Dockerfile$/"` — the anchors sit inside the quotes, so `"Dockerfile"` is not a substring. The equivalent probe `rg -n 'Dockerfile' .github/renovate.json5` (plus `rg -n '"semanticCommits"'`) was run instead and returned the expected lines 18 and 20; the second probe matched `pi-coding-agent@1.5.2` as planned.
 
 ### Slice 2: Helm chart
 **Delivers:** `ct lint` green over the `ci/` fixtures, `helm template` assertions passing for the default, existing-secret, RBAC, persistence, and schema-rejection cases, and a `chart` job in `ci.yml`. User feedback: run `ct lint --config ct.yaml` locally and render each fixture.
