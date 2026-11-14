@@ -400,7 +400,12 @@ This task runs in parallel with Task 2.
 - [ ] Expect the first update pull request to carry a `chore(deps):` title, which semantic-release maps to a patch release.
 - [ ] If the app is installed but no dashboard appears, record the observed configuration (onboarding disabled, repository outside the app's scope) instead of assuming the automation works.
 
-### Final verification
+### Task 9: Final verification
+**Delivers:** the feature-level acceptance gate that only the completed slices satisfy.
+**Blocked by:** Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8
+**Traces to:** the design's Requirements (all)
+**Files:** none (verification only)
+
 - [ ] `scripts/image-smoke.sh` green against a rebuild of the final `Dockerfile` (Requirements: credential failure, toolchain, non-root, session override; the script also proves the Dockerfile pin matches `harness.PinnedPiVersion`).
 - [ ] `ct lint --config ct.yaml` plus all fixture template assertions green (Requirements: default install, existing secret, RBAC, schema rejection, persistence including the existing claim).
 - [ ] The `ci.yml` `image` and `chart` jobs are green on the feature pull request, running the same commands as Tasks 1 and 4.
