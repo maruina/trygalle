@@ -37,7 +37,9 @@ spec:
       {{- end }}
       containers:
         - name: trygalle
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          # The release workflow pushes v-prefixed tags (v<version>), so the
+          # empty-tag default prepends the v the chart version alone lacks.
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}'
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.trygalle.args }}
           args:
