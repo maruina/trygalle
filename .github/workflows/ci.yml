@@ -35,6 +35,15 @@ jobs:
         env:
           TRYGALLE_PI_TESTS: ${{ matrix.mode == 'full' && 'on' || 'auto' }}
 
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t trygalle:smoke .
+      - name: Run image smoke checks
+        run: scripts/image-smoke.sh trygalle:smoke
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

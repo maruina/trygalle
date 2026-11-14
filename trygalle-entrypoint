@@ -1,0 +1,5 @@
+#!/bin/sh
+# The future dotfiles sidecar maps the harness checkout into the agent
+# directory here, before Trygalle starts Pi. deliberate: hook only; the
+# sidecar design owns the mapping and this script stays minimal until then.
+exec trygalle --pi-bin pi --session-dir "${TRYGALLE_SESSION_DIR:-/data/pi/sessions}" "$@"

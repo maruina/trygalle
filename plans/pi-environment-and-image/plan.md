@@ -26,6 +26,17 @@
 | `write` | `agent-selected` | The plan is a prose artifact | Applied to this document and the alignment brief |
 | `feature-worktree` | `prompt-required` | Writes and commits must stay off `main` | Continued in the resolved design worktree per rule 1 (input path resolved to it); base checkout stays on `main` |
 
+### Execution
+
+Slice 1 executed 2026-11-14 by glm-5.3-flash in the plan worktree (`maruina/pi-environment-and-image`, base `67f23b4`).
+
+| Skill | Source | Why loaded | How used |
+|---|---|---|---|
+| `skill-loader` | `prompt-required` | Execution stage routing | No Go, Kubernetes-API, CLI, or Terraform triggers; `script-best-practices` is the only language skill this slice's files trigger |
+| `script-best-practices` | `skill-loader` | `scripts/image-smoke.sh` and `trygalle-entrypoint` are new POSIX scripts | `set -eu`, quoted expansion, stderr diagnostics, exec bit, constants at top, `mktemp` + `trap` cleanup applied to the smoke script; the entrypoint stays POSIX `sh` per the design |
+
+Task 1 deviation note: the smoke script extracts the pin literals with `grep -o`, not the planned `rg -o` — GitHub-hosted runners do not guarantee ripgrep, and `grep` keeps the script dependency-free on every machine that runs it. The check itself (Go constant == Dockerfile literal == in-image `pi --version` == 1.5.2) is unchanged. Verified locally: `docker build -t trygalle:smoke .` green (linux/arm64 native), smoke script PASS on all checks, `go test -race -short ./...`, `go fix -diff ./...`, and `gofmt -l` clean.
+
 ## Planning alignment brief (confirmed 2026-11-14)
 
 Confirmed decisions the user approved in chat before this plan was written:
@@ -286,15 +297,15 @@ The release workflow SHALL push `ghcr.io/maruina/trygalle:v<version>` and `ghcr.
 **Traces to:** Requirements "Loud credential failure", "Pinned toolchain", "Non-root runtime", "Session directory override and flag passthrough"; design Image and Entrypoint sections
 **Files:** `Dockerfile`, `trygalle-entrypoint`, `scripts/image-smoke.sh`, `.github/workflows/ci.yml`
 
-- [ ] Write the smoke script first and run `scripts/image-smoke.sh trygalle:smoke`; expect failure because the image does not exist.
-- [ ] Implement the two-stage `Dockerfile`: `FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build` with `ARG TARGETARCH`, `CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath`; runtime stage `node:24-bookworm-slim` with apt tools, the literal pinned npm line (`--ignore-scripts`), the checksummed kubectl at `ARG KUBECTL_VERSION=v1.37.2` downloaded from `https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl` (the `v` is part of the ARG, so the URL adds none), `LABEL org.opencontainers.image.source`, the copied binary and entrypoint, `mkdir`/`chown` for `/data/pi/{sessions,work}`, `USER node`, `WORKDIR /data/pi/work`, `ENTRYPOINT ["/usr/local/bin/trygalle-entrypoint"]`.
-- [ ] Write `trygalle-entrypoint` as the design's POSIX script: `exec trygalle --pi-bin pi --session-dir "${TRYGALLE_SESSION_DIR:-/data/pi/sessions}" "$@"` with the deliberate sidecar-hook comment.
-- [ ] Implement `scripts/image-smoke.sh` (POSIX, `set -eu`): run with no inputs expecting non-zero + diagnostic; fake-`trygalle` PATH check for the entrypoint args (default and override); the pin cross-check (extract `PinnedPiVersion` from `internal/harness/harness.go` with `rg -o`, extract the npm literal from `Dockerfile`, and require all three — Go constant, Dockerfile literal, in-image `pi --version` — to be equal); `trygalle --help`; `kubectl version --client` against the `ARG KUBECTL_VERSION` literal; tool resolution checks; `id -u` = 1000; probe writes in both `/data/pi` paths. Every check captures output and matches it after an explicit exit-code check, because POSIX `sh` has no `pipefail`.
-- [ ] Set the exec bit on `trygalle-entrypoint` and `scripts/image-smoke.sh` (`COPY` preserves it).
-- [ ] Add the `image` job to `.github/workflows/ci.yml`: checkout, `docker build -t trygalle:smoke .`, `scripts/image-smoke.sh trygalle:smoke` on `ubuntu-latest` for every pull request and push to `main`.
-- [ ] Run `docker build -t trygalle:smoke . && scripts/image-smoke.sh trygalle:smoke`; expect every check green.
-- [ ] Run `go test -race -short ./...`; expect unchanged green.
-- [ ] Commit with `feat: add docker image, entrypoint, and image smoke script`.
+- [x] Write the smoke script first and run `scripts/image-smoke.sh trygalle:smoke`; expect failure because the image does not exist. (Failed at the Dockerfile pin extraction, the first check that needs a not-yet-existing file; the image checks behind it could not pass either.)
+- [x] Implement the two-stage `Dockerfile`: `FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build` with `ARG TARGETARCH`, `CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath`; runtime stage `node:24-bookworm-slim` with apt tools, the literal pinned npm line (`--ignore-scripts`), the checksummed kubectl at `ARG KUBECTL_VERSION=v1.37.2` downloaded from `https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl` (the `v` is part of the ARG, so the URL adds none), `LABEL org.opencontainers.image.source`, the copied binary and entrypoint, `mkdir`/`chown` for `/data/pi/{sessions,work}`, `USER node`, `WORKDIR /data/pi/work`, `ENTRYPOINT ["/usr/local/bin/trygalle-entrypoint"]`. (`ARG TARGETARCH` is declared in the runtime stage too, because kubectl's URL needs it there.)
+- [x] Write `trygalle-entrypoint` as the design's POSIX script: `exec trygalle --pi-bin pi --session-dir "${TRYGALLE_SESSION_DIR:-/data/pi/sessions}" "$@"` with the deliberate sidecar-hook comment.
+- [x] Implement `scripts/image-smoke.sh` (POSIX, `set -eu`): run with no inputs expecting non-zero + diagnostic; fake-`trygalle` PATH check for the entrypoint args (default and override); the pin cross-check (extract `PinnedPiVersion` from `internal/harness/harness.go` with `rg -o`, extract the npm literal from `Dockerfile`, and require all three — Go constant, Dockerfile literal, in-image `pi --version` — to be equal); `trygalle --help`; `kubectl version --client` against the `ARG KUBECTL_VERSION` literal; tool resolution checks; `id -u` = 1000; probe writes in both `/data/pi` paths. Every check captures output and matches it after an explicit exit-code check, because POSIX `sh` has no `pipefail`.
+- [x] Set the exec bit on `trygalle-entrypoint` and `scripts/image-smoke.sh` (`COPY` preserves it).
+- [x] Add the `image` job to `.github/workflows/ci.yml`: checkout, `docker build -t trygalle:smoke .`, `scripts/image-smoke.sh trygalle:smoke` on `ubuntu-latest` for every pull request and push to `main`.
+- [x] Run `docker build -t trygalle:smoke . && scripts/image-smoke.sh trygalle:smoke`; expect every check green.
+- [x] Run `go test -race -short ./...`; expect unchanged green.
+- [x] Commit with `feat: add docker image, entrypoint, and image smoke script`.
 
 ### Task 2: Renovate manager covers the Dockerfile
 **Delivers:** one bump PR will update all four Pi pin surfaces.
