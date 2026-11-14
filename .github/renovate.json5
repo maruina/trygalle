@@ -1,6 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  // Top level because Renovate 44 rejects it inside a customManagers entry
+  // (issue #14): semantic commits give the bump PR a `chore(deps):` title,
+  // which semantic-release maps to a patch release.
+  "semanticCommits": "enabled",
   "customManagers": [
     {
       "customType": "regex",
@@ -9,15 +13,12 @@
       // install line, the AGENTS.md install line, and the Dockerfile npm
       // literal together — and the full CI job then runs the live suite
       // against the new pin, which is the upgrade evidence gate (AGENTS.md).
-      // semanticCommits gives the bump PR a `chore(deps):` title, which
-      // semantic-release maps to a patch release.
       "managerFilePatterns": [
         "/^internal/harness/harness\\.go$/",
         "/^\\.github/workflows/ci\\.yml$/",
         "/^AGENTS\\.md$/",
         "/^Dockerfile$/"
       ],
-      "semanticCommits": "enabled",
       "matchStrings": [
         "PinnedPiVersion\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
         "@earendil-works/pi-coding-agent@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
