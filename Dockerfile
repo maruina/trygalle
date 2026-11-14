@@ -10,7 +10,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath -o /out/trygalle ./cmd/trygalle
 
 # Stage 2: runtime.
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 ARG TARGETARCH
 # Pinned to harness.PinnedPiVersion; Renovate bumps every pin surface in one PR.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
