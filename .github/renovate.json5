@@ -5,6 +5,44 @@
   // (issue #14): semantic commits give the bump PR a `chore(deps):` title,
   // which semantic-release maps to a patch release.
   "semanticCommits": "enabled",
+  // Automerge behavior copied from maruina/go-infrabin's renovate.json.
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true
+    },
+    {
+      // Automerge major updates when Build passes; accepted risk: an update
+      // that breaks Build after merge forces a revert.
+      "matchUpdateTypes": ["major"],
+      "automerge": true
+    },
+    {
+      "description": "Group all Go module dependency updates",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Go module dependencies"
+    },
+    {
+      "description": "Separate PR for Go version updates",
+      "matchManagers": ["gomod", "dockerfile", "github-actions"],
+      "matchPackageNames": ["go", "golang", "actions/setup-go"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "Go version"
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Auto-update Docker digests",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest"],
+      "automerge": true
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
