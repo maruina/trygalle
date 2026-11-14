@@ -5,6 +5,9 @@
   // (issue #14): semantic commits give the bump PR a `chore(deps):` title,
   // which semantic-release maps to a patch release.
   "semanticCommits": "enabled",
+  // Prune go.sum on every go.mod bump instead of leaving stale checksums
+  // behind (seen on the go-telegram v1.28.0 automerge).
+  "postUpdateOptions": ["gomodTidy"],
   // Automerge behavior copied from maruina/go-infrabin's renovate.json.
   "labels": ["dependencies"],
   "packageRules": [
