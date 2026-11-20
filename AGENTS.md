@@ -45,7 +45,7 @@ A binary that exists but cannot report `--version` fails in every mode.
 Run the full suite against the pin:
 
 ```bash
-npm install --global @earendil-works/pi-coding-agent@1.5.2
+npm install --global @earendil-works/pi-coding-agent@1.6.0
 TRYGALLE_PI_TESTS=on go test -race ./...
 ```
 
