@@ -23,7 +23,7 @@ import (
 // the upgrade evidence gate: bumping pi requires this constant and the whole
 // live suite to move together.
 const (
-	PinnedPiVersion = "1.5.2"
+	PinnedPiVersion = "1.6.0"
 	envTests        = "TRYGALLE_PI_TESTS"
 	envBin          = "TRYGALLE_PI_BIN"
 )
