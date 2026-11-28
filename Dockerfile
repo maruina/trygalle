@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath -o /out/trygalle ./cmd/t
 FROM node:26-bookworm-slim
 ARG TARGETARCH
 # Pinned to harness.PinnedPiVersion; Renovate bumps every pin surface in one PR.
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.6.1
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.7.0
 # kubectl is not in the Debian archive; install the pinned release binary and
 # verify it against its published SHA256 checksum. Kubectl is deliberately not
 # Renovate-managed; bump it to stay within one minor of the target API server.
